@@ -307,6 +307,7 @@ PL_HTML = """
           <label><input type="checkbox" id="colcb-orders" onchange="plSaveVisibleCols()"> Orders</label>
           <label><input type="checkbox" id="colcb-units" onchange="plSaveVisibleCols()"> Units</label>
           <label><input type="checkbox" id="colcb-gross" onchange="plSaveVisibleCols()"> Gross sales (ex-VAT)</label>
+          <label><input type="checkbox" id="colcb-asp" onchange="plSaveVisibleCols()"> Avg sell price (inc-VAT)</label>
           <label><input type="checkbox" id="colcb-referral_fees" onchange="plSaveVisibleCols()"> Referral fees</label>
           <label><input type="checkbox" id="colcb-other_fees" onchange="plSaveVisibleCols()"> Other fees</label>
           <label><input type="checkbox" id="colcb-promotions" onchange="plSaveVisibleCols()"> Promotions</label>
@@ -406,6 +407,7 @@ PL_HTML = """
         <th class="col-orders sortable" data-key="orders" onclick="plSortBy('orders',this)">Orders<span class="arrow"></span></th>
         <th class="col-units sortable" data-key="units" onclick="plSortBy('units',this)">Units<span class="arrow"></span></th>
         <th class="col-gross sortable" data-key="gross" onclick="plSortBy('gross',this)">Gross sales (ex-VAT)<span class="arrow"></span></th>
+        <th class="col-asp sortable" data-key="asp" onclick="plSortBy('asp',this)" title="Average selling price = gross sales inc-VAT ÷ units (per pack sold), over the selected date range.">Avg sell price (inc-VAT)<span class="arrow"></span></th>
         <th class="col-referral_fees">Referral fees</th>
         <th class="col-other_fees">Other fees</th>
         <th class="col-promotions">Promotions</th>
@@ -441,6 +443,7 @@ PL_HTML = """
         data-sort-orders="{{ r.orders or 0 }}"
         data-sort-units="{{ r.units or 0 }}"
         data-sort-gross="{{ r.gross_sales_exvat or 0 }}"
+        data-sort-asp="{{ ((r.gross_sales_incvat or 0) / r.units) if r.units else -1 }}"
         data-sort-cogs="{{ r.cogs or 0 }}"
         data-sort-postage="{{ r.postage or 0 }}"
         data-referral="{{ r.referral_fees or 0 }}"
@@ -477,6 +480,7 @@ PL_HTML = """
         <td class="col-orders">{{ r.orders }}</td>
         <td class="col-units">{{ r.units or 0 }}</td>
         <td class="col-gross">£{{ "%.2f"|format(r.gross_sales_exvat or 0) }}</td>
+        <td class="col-asp">{% if r.units %}£{{ "%.2f"|format((r.gross_sales_incvat or 0) / r.units) }}{% else %}—{% endif %}</td>
         <td class="col-referral_fees">£{{ "%.2f"|format(r.referral_fees or 0) }}</td>
         <td class="col-other_fees">£{{ "%.2f"|format(r.other_fees or 0) }}</td>
         <td class="col-promotions">£{{ "%.2f"|format(r.promotions or 0) }}</td>
@@ -579,7 +583,7 @@ PL_HTML = """
     // (previously only these 12 "optional" ones were -- Canonical SKU, ASIN,
     // Account, Orders, Units, Gross sales, COGS, Priced, Net profit and
     // Margin used to be permanently on with no checkbox at all).
-    var PL_OPTIONAL_COLS = ["sku","asin","family","type","account","orders","units","gross",
+    var PL_OPTIONAL_COLS = ["sku","asin","family","type","account","orders","units","gross","asp",
       "referral_fees","other_fees","promotions","cogs","priced","postage","netprofit","margin",
       "ad_spend","ad_promoted","ad_halo","after_ads","tacos","vat","pending","postage_source"];
     // module2_pl_ui_fixes Fix 3: default-visible = everything EXCEPT Family
@@ -604,7 +608,7 @@ PL_HTML = """
         // newly-toggleable fixed column (SKU, ASIN, Orders, etc.) hidden
         // the moment this ships -- and so a stale prior "Family/Type
         // checked" preference from earlier testing doesn't linger forever.
-        var saved = JSON.parse(localStorage.getItem("pl_optional_cols_v3") || "null");
+        var saved = JSON.parse(localStorage.getItem("pl_optional_cols_v4") || "null");
         if (saved && Array.isArray(saved)) return saved;
       } catch(e) {}
       return PL_DEFAULT_VISIBLE_COLS.slice();
@@ -624,7 +628,7 @@ PL_HTML = """
         var cb = document.getElementById("colcb-" + c);
         return cb && cb.checked;
       });
-      localStorage.setItem("pl_optional_cols_v3", JSON.stringify(cols));
+      localStorage.setItem("pl_optional_cols_v4", JSON.stringify(cols));
       plApplyVisibleCols(cols);
     }
     document.addEventListener("DOMContentLoaded", function(){ plApplyVisibleCols(plLoadVisibleCols()); });
