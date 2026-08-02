@@ -29,7 +29,17 @@ import sqlite3
 try:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.extensions
     _HAVE_PG = True
+    # psycopg2 returns NUMERIC/DECIMAL as decimal.Decimal; SQLite returns REAL as
+    # float, and the pl_* code does plain float arithmetic on money columns
+    # (float + value). Cast NUMERIC -> float globally so both backends behave the
+    # same and we never hit "unsupported operand: float + Decimal". Money here is
+    # <1e6 with 4dp, well within float precision, and matches the old SQLite path.
+    _DEC2FLOAT = psycopg2.extensions.new_type(
+        psycopg2.extensions.DECIMAL.values, "DEC2FLOAT",
+        lambda v, cur: float(v) if v is not None else None)
+    psycopg2.extensions.register_type(_DEC2FLOAT)
 except Exception:
     _HAVE_PG = False
 
@@ -42,9 +52,58 @@ def is_postgres(explicit_url=None):
     return bool(_pg_url(explicit_url)) and _HAVE_PG
 
 
+# ── SQLite-only SQL function translation ─────────────────────────────────────
+# The pl_* queries use a handful of SQLite built-ins that Postgres does not have.
+# We rewrite them here (Postgres path only) so the app SQL stays unchanged.
+#   strftime('%Y-%m-%d', col) -> to_char((col)::timestamp, 'YYYY-MM-DD')
+#   julianday(x)              -> (EXTRACT(EPOCH FROM (x)::timestamp)/86400.0)
+#   GROUP_CONCAT([DISTINCT] x)-> string_agg([DISTINCT] (x)::text, ',')
+#   date(x) / datetime(x)     -> (x)::date / (x)::timestamp
+import re as _re
+
+_STRFTIME_CODES = {'Y': 'YYYY', 'm': 'MM', 'd': 'DD', 'H': 'HH24',
+                   'M': 'MI', 'S': 'SS', 'W': 'IW', 'j': 'DDD', 'w': 'ID'}
+
+
+def _strftime_fmt(fmt):
+    """SQLite strftime format -> Postgres to_char template. Literal letters get
+    double-quoted so to_char treats them as text, not format tokens."""
+    out, lit = [], ''
+
+    def flush():
+        nonlocal lit
+        if lit:
+            out.append('"' + lit + '"' if any(c.isalpha() for c in lit) else lit)
+            lit = ''
+    i = 0
+    while i < len(fmt):
+        if fmt[i] == '%' and i + 1 < len(fmt):
+            flush(); out.append(_STRFTIME_CODES.get(fmt[i + 1], fmt[i + 1])); i += 2
+        else:
+            lit += fmt[i]; i += 1
+    flush()
+    return ''.join(out)
+
+
+def _translate_sqlite_funcs(sql):
+    sql = _re.sub(r"strftime\(\s*'([^']*)'\s*,\s*([^),]+)\)",
+                  lambda m: "to_char((%s)::timestamp, '%s')" % (m.group(2).strip(), _strftime_fmt(m.group(1))),
+                  sql)
+    sql = _re.sub(r"julianday\(\s*([^)]+?)\s*\)",
+                  r"(EXTRACT(EPOCH FROM (\1)::timestamp)/86400.0)", sql)
+    sql = _re.sub(r"GROUP_CONCAT\(\s*(DISTINCT\s+)?([^)]+?)\s*\)",
+                  lambda m: "string_agg(%s(%s)::text, ',')" % (m.group(1) or '', m.group(2).strip()),
+                  sql, flags=_re.IGNORECASE)
+    sql = _re.sub(r"\bdatetime\(\s*([^)]+?)\s*\)", r"(\1)::timestamp", sql, flags=_re.IGNORECASE)
+    sql = _re.sub(r"\bdate\(\s*([^)]+?)\s*\)", r"(\1)::date", sql, flags=_re.IGNORECASE)
+    return sql
+
+
 # translate a `?`-placeholder, sqlite-style SQL string to psycopg2 style.
-# order matters: double the %, THEN swap ? -> %s.
+# order: SQLite-func rewrite FIRST (its output has no % or ?), THEN double the %
+# (for LIKE literals), THEN swap ? -> %s.
 def _to_pg_sql(sql):
+    sql = _translate_sqlite_funcs(sql)
     return sql.replace("%", "%%").replace("?", "%s")
 
 

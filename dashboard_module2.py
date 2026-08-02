@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timedelta
 from flask import request, redirect, render_template_string, flash, Response
 
-from module1_db import get_accounts
+from pl_db import get_accounts   # Module 2's own accounts reader (Postgres/SQLite via db.py)
 
 import pl_db
 import pl_cogs

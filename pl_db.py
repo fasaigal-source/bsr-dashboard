@@ -73,6 +73,21 @@ def get_db(db_path=DB_PATH):
     return conn
 
 
+def get_accounts(db_path=DB_PATH):
+    """Module 2's account list, read from Module 2's OWN database (Postgres on
+    Railway, SQLite locally). Previously imported from module1_db, which is
+    SQLite-only and has no `accounts` table on Railway -> 500 'no such table:
+    accounts'. `active` is stored 0/1 (integer) on both backends, so `active=1`
+    is portable."""
+    conn = get_db(db_path)
+    if not db.table_exists(conn, "accounts"):
+        conn.close()
+        return []
+    rows = conn.execute("SELECT * FROM accounts WHERE active=1").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SCHEMA
 # ─────────────────────────────────────────────────────────────────────────────
