@@ -88,6 +88,39 @@ def get_accounts(db_path=DB_PATH):
     return [dict(r) for r in rows]
 
 
+def get_managed_asins(account_id=None, db_path=DB_PATH):
+    """managed_asins from Module 2's OWN database (it was migrated there). Was
+    imported from module1_db (SQLite), which has no managed_asins table on Railway
+    — so the reprocess triggered by any dashboard write (COGS/postage edits) blew
+    up there. `active` is stored 0/1 on both backends, so `active=1` is portable."""
+    conn = get_db(db_path)
+    if not db.table_exists(conn, "managed_asins"):
+        conn.close()
+        return []
+    if account_id:
+        rows = conn.execute(
+            "SELECT * FROM managed_asins WHERE account_id=? AND active=1", (account_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM managed_asins WHERE active=1").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_keys_for_orders(account_id, order_ids, db_path=DB_PATH):
+    """(account_id, order_id, order_item_id) keys for the given orders — so a
+    manual-postage edit reprocesses ONLY those orders' line items, not all ~34k."""
+    if not order_ids:
+        return []
+    conn = get_db(db_path)
+    ph = ",".join("?" for _ in order_ids)
+    rows = conn.execute(
+        f"SELECT DISTINCT account_id, order_id, order_item_id FROM pl_line_items "
+        f"WHERE account_id=? AND order_id IN ({ph})",
+        (account_id, *order_ids)).fetchall()
+    conn.close()
+    return [(r["account_id"], r["order_id"], r["order_item_id"]) for r in rows]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SCHEMA
 # ─────────────────────────────────────────────────────────────────────────────

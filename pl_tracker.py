@@ -81,7 +81,10 @@ import httpx
 
 import pl_db
 import pl_cogs
-from module1_db import get_accounts, get_managed_asins
+# Read accounts + managed_asins from Module 2's OWN database (Postgres on Railway,
+# SQLite locally) via pl_db — NOT module1_db, which is SQLite-only and has neither
+# table on Railway (that broke every dashboard reprocess: COGS/postage edits).
+from pl_db import get_accounts, get_managed_asins
 from module1_collector import make_credentials, get_marketplace
 
 try:
@@ -107,8 +110,14 @@ HTTP_TIMEOUT_SECONDS = 60   # httpx's own default (~5s total) is too tight for A
 
 
 def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+    # config.json holds SP-API creds + settings for the LOCAL sync. On Railway the
+    # dashboard has no config.json (it's gitignored), but a network-free reprocess
+    # doesn't need it — accounts come from the DB. Return {} rather than crashing.
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
 
 def get_effective_accounts(cfg):
@@ -310,8 +319,18 @@ def _call_with_backoff(fn, *args, max_attempts=6, **kwargs):
 
 
 def fetch_events_in_window(credentials, marketplace, posted_after, posted_before):
-    """Yields each page's `FinancialEvents` dict, following NextToken."""
+    """All pages' `FinancialEvents` dicts for the window, following NextToken.
+
+    Pages are fetched BACK-TO-BACK and buffered here, BEFORE the caller does any
+    per-event work. This matters against a REMOTE database: the Finances NextToken
+    has a short TTL, and the old generator yielded each page so the caller's slow
+    per-event DB writes (now round-trips to Railway Postgres over the proxy) ran
+    *between* paginated calls — the token could expire mid-walk ('Time to live
+    (TTL) exceeded of next token'). Buffering keeps each NextToken used ~2.1s after
+    it was issued (pacing only), never blocked behind DB writes. Returns a list, so
+    the existing `for fe in fetch_events_in_window(...)` loop is unchanged."""
     client = Finances(credentials=credentials, marketplace=marketplace, timeout=HTTP_TIMEOUT_SECONDS)
+    pages = []
     next_token = None
     while True:
         kwargs = {"NextToken": next_token} if next_token else {
@@ -319,11 +338,12 @@ def fetch_events_in_window(credentials, marketplace, posted_after, posted_before
         }
         resp = _call_with_backoff(client.list_financial_events, **kwargs)
         payload = resp.payload or {}
-        yield payload.get("FinancialEvents", {}) or {}
+        pages.append(payload.get("FinancialEvents", {}) or {})
         next_token = payload.get("NextToken")
-        time.sleep(2.1)   # Finances API: pace well under the burst limit
         if not next_token:
             break
+        time.sleep(2.1)   # Finances API pacing (0.5 req/s); no DB work in between now
+    return pages
 
 
 def fetch_event_group_status_map(credentials, marketplace, posted_after, posted_before):
@@ -854,6 +874,23 @@ def run_pl_job(since_days=None):
                         f"posted {a['posted_date']}, {a['gap_days']:.1f} day(s) late. {a['note']}")
     log.info("─" * 70 + "\n")
     return summary
+
+
+def reprocess_orders(account_id, order_ids):
+    """Network-free recompute of ONLY the given orders' line items (e.g. after a
+    manual-postage edit). Far cheaper than reprocess_from_stored_events(family=None),
+    which rebuilds all ~34k rows and would time out a web request over the DB."""
+    if not order_ids:
+        return 0
+    products = get_managed_asins(account_id)
+    sku_map = {p["sku"]: p for p in products if p.get("sku")}
+
+    def asin_lookup(sku, _m=sku_map):
+        return _m.get(sku) if sku else None
+
+    keys = pl_db.get_keys_for_orders(account_id, order_ids)
+    return pl_db.reprocess_all_from_raw_events(
+        account_id=account_id, asin_lookup=asin_lookup, keys=keys)
 
 
 def reprocess_from_stored_events(account_id=None, family=None):

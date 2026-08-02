@@ -2481,7 +2481,13 @@ def pl_postage_save():
         flash("No order(s) selected — tick at least one row first.")
         return redirect(return_url)
     n = pl_postage.bulk_set_manual_postage(account_id, order_ids, amount)
-    reprocessed = _reprocess_after_cogs_change()
+    # Recompute ONLY the edited orders (not all ~34k rows) so the manual postage
+    # is applied — postage_source flips to 'manual' and they drop off this worklist.
+    try:
+        reprocessed = pl_tracker.reprocess_orders(account_id, order_ids)
+    except Exception as e:
+        app.logger.warning(f"postage reprocess failed: {e}")
+        reprocessed = None
     flash(f"Set £{amount:.2f} postage for {n} order(s), now postage_source='manual'."
           + (f" Recomputed {reprocessed} line item(s)." if reprocessed is not None else ""))
     return redirect(return_url)
