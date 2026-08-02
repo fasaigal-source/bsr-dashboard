@@ -106,7 +106,7 @@ PL_HTML = """
  tr.pl-hidden{display:none !important}
  .chart-note{font-size:11px;color:#8a94a2;margin:-8px 0 4px;text-align:right}
 </style></head><body>
-<div class="header"><b>P&amp;L</b><div><a href="/">Home</a><a href="/products">Products</a><a href="/pl/cogs">COGS &amp; pricing</a><a href="/pl/cogs/skus">SKU merge</a><a href="/pl/ads">Ad spend</a><a href="/pl/postage">Missing postage</a></div></div>
+{{ nav|safe }}
 <div class="wrap">
   <div class="toolbar">
     {# module2_filters_in_url: was <form method="GET" action="/pl"> whose selects
@@ -1349,7 +1349,7 @@ COGS_HTML = """
  label{font-size:12px;color:#5a6472}
  input[type=number]{padding:7px 9px;border:1px solid #dde3e9;border-radius:6px;font-size:13px;width:110px}
 </style></head><body>
-<div class="header"><b>COGS &amp; pricing</b><div><a href="/">Home</a><a href="/pl">P&amp;L</a><a href="/pl/cogs/skus">SKU merge &amp; fix</a><a href="/pl/ads">Ad spend</a></div></div>
+{{ nav|safe }}<div class="header" style="padding-top:10px"><b>COGS &amp; pricing</b><div><a href="/pl/cogs/skus">SKU merge &amp; fix</a></div></div>
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
 
@@ -1937,7 +1937,7 @@ MERGE_HTML = """
  .staged-list{font-size:12px;max-height:150px;overflow:auto;flex:1;line-height:1.6}
  code{background:#f1f4f7;padding:1px 5px;border-radius:4px;font-size:12px}
 </style></head><body>
-<div class="header"><b>SKU merge &amp; COGS fix</b><div><a href="/">Home</a><a href="/pl">P&amp;L</a><a href="/pl/cogs">COGS &amp; pricing</a><a href="/pl/ads">Ad spend</a></div></div>
+{{ nav|safe }}<div class="header" style="padding-top:10px"><b>SKU merge &amp; COGS fix</b><div><a href="/pl/cogs">← COGS &amp; pricing</a></div></div>
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
 
@@ -2207,7 +2207,7 @@ ADS_HTML = """
  label{font-size:12px;color:#5a6472}
  select{padding:8px 12px;border:1px solid #dde3e9;border-radius:8px;font-size:13px;background:#fff}
 </style></head><body>
-<div class="header"><b>Ad spend</b><div><a href="/">Home</a><a href="/pl">P&amp;L</a><a href="/pl/cogs">COGS &amp; pricing</a></div></div>
+{{ nav|safe }}
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
 
@@ -2385,7 +2385,7 @@ POSTAGE_HTML = """
  select{padding:8px 12px;border:1px solid #dde3e9;border-radius:8px;font-size:13px;background:#fff}
  input[type=number]{padding:7px 9px;border:1px solid #dde3e9;border-radius:6px;font-size:13px;width:110px}
 </style></head><body>
-<div class="header"><b>Missing postage</b><div><a href="/">Home</a><a href="/pl">P&amp;L</a><a href="/pl/cogs">COGS &amp; pricing</a></div></div>
+{{ nav|safe }}
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
 
@@ -2549,8 +2549,8 @@ SKU_DETAIL_HTML = """
  .row-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
  .bsr-slot{border:2px dashed #dde3e9;border-radius:10px;padding:24px;text-align:center;color:#8a94a2;font-size:13px}
 </style></head><body>
-<div class="header"><b>{{ canonical_sku }}</b>
-  <div><a href="{{ back_url }}">← Back to rollup</a><a href="/pl">P&amp;L</a><a href="/pl/cogs">COGS &amp; pricing</a><a href="/pl/ads">Ad spend</a><a href="/pl/postage">Missing postage</a></div>
+{{ nav|safe }}<div class="header" style="padding-top:10px"><b>{{ canonical_sku }}</b>
+  <div><a href="{{ back_url }}">← Back to rollup</a></div>
 </div>
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}

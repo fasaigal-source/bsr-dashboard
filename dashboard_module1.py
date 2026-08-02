@@ -16,7 +16,7 @@ from module1_db import (
     import_bsr_history_csv, get_bsr_history_import,
 )
 
-from dashboard_app import app
+from dashboard_app import app, COLLECTOR_STATUS_URL
 
 # Detail-page data source. If COLLECTOR_RO_URL is set, Module 1's product page
 # reads the LIVE collector Postgres READ-ONLY (collector_ro maps its schema:
@@ -29,6 +29,39 @@ if os.environ.get("COLLECTOR_RO_URL"):
         import collector_ro as _COLLECTOR
     except Exception:
         _COLLECTOR = None
+
+
+def _readonly_block():
+    """When the dashboard is READ-ONLY to the collector, management writes (add /
+    edit / pause / import / account changes) must not run — the collector owns the
+    watchlist. Returns a redirect Response in that mode, else None so local dev
+    (SQLite) keeps working. Never writes to the collector."""
+    if _COLLECTOR is not None:
+        flash("Read-only here — manage the watchlist and accounts on the collector.")
+        return redirect(request.referrer or "/products")
+    return None
+
+
+# Small link-out page used where management lives on the collector, not here.
+MANAGE_HTML = """
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title }} — BSR Repricer</title>
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef1f4;color:#12161c;margin:0}
+ .wrap{max-width:720px;margin:56px auto;padding:0 20px}
+ .card{background:#fff;border-radius:12px;padding:36px;box-shadow:0 2px 8px rgba(0,0,0,.06);text-align:center}
+ h2{margin:0 0 10px}
+ .muted{color:#8a94a2;font-size:14px;line-height:1.5}
+ .btn{display:inline-block;margin-top:20px;background:#0e5c5b;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-weight:600}
+</style></head><body>
+{{ nav|safe }}
+<div class="wrap"><div class="card">
+  <h2>{{ title }}</h2>
+  <p class="muted">{{ message }}</p>
+  <a class="btn" href="{{ collector_url }}" target="_blank" rel="noopener">Open the collector &#8599;</a>
+</div></div></body></html>
+"""
 
 
 
@@ -64,9 +97,7 @@ HOME_HTML = """
  .badge.ok{background:#e7f6ee;color:#166b3d}
  .empty{background:#fff;border-radius:12px;padding:40px;text-align:center;color:#8a94a2}
 </style></head><body>
-<div class="header"><b>BSR Repricer</b>
- <div class="nav"><a href="/products">Products</a><a href="/accounts">Accounts</a><a href="/recommendations">Recommendations</a><a href="/baseline">Market baseline</a><a href="/pl">P&amp;L</a></div>
-</div>
+{{ nav|safe }}
 <div class="wrap">
   <div class="toolbar">
     <span class="pill">Pending decisions: <b>{{ pending }}</b></span>
@@ -174,9 +205,7 @@ PRODUCT_HTML = """
  .chart-note{font-size:12px;color:#8a94a2;margin:4px 0 12px}
  canvas{max-height:380px}
 </style></head><body>
-<div class="header"><b>{{ sku }}</b>
-  <div><a href="/">← Products</a><a href="/recommendations">Recommendations</a></div>
-</div>
+{{ nav|safe }}
 <div class="wrap">
   <div class="card">
     <div class="title">{{ sku }} <span style="font-weight:400;color:#8a94a2;font-size:14px;">· {{ brand }}</span></div>
@@ -193,6 +222,7 @@ PRODUCT_HTML = """
     <div class="chart-note">Teal line = live root BSR (axis reversed — up means improving). Bars = units/day. {% if has_history %}Grey line = imported historic BSR (Trellis, reference only).{% endif %}</div>
     <canvas id="chart"></canvas>
   </div>
+  {% if not collector_mode %}
   <div class="card">
     <div class="title" style="font-size:15px;">Import historic BSR</div>
     <div class="chart-note">One-off: load this ASIN's past BSR/price from a Trellis or Helium 10 export (columns: Date, Best Seller Rank, Price). Reference layer only — never used for live decisions.</div>
@@ -202,6 +232,7 @@ PRODUCT_HTML = """
     </form>
     {% if has_history %}<div class="chart-note" style="margin-top:8px;">{{ history_count }} historic days loaded, back to {{ history_from }}.</div>{% endif %}
   </div>
+  {% endif %}
 </div>
 <script>
 const labels = {{ labels|tojson }};
@@ -387,7 +418,7 @@ RECS_HTML = """
  .time-label{font-size:12px;color:#aab2bd}
  .bounds{font-size:11.5px;color:#aab2bd;font-family:ui-monospace,Menlo,monospace}
 </style></head><body>
-<div class="header"><b>Recommendations</b><a href="/">← Home</a></div>
+{{ nav|safe }}
 <div class="container">
   {% if not recs %}
   <div class="card"><div class="empty">No recommendations yet.<br>
@@ -451,6 +482,9 @@ def recommendations_page():
 
 @app.route("/recommendations/<int:rec_id>/decide", methods=["POST"])
 def decide_rec(rec_id):
+    r = _readonly_block()
+    if r:
+        return r
     data          = request.form
     decision      = data.get("decision")
     decided_price = float(data["decided_price"]) if data.get("decided_price") else None
@@ -466,6 +500,9 @@ def decide_rec(rec_id):
 @app.route("/recommendations/<int:rec_id>/approve")
 def quick_approve(rec_id):
     """One-click approve (from email) at the recommended price."""
+    _r = _readonly_block()
+    if _r:
+        return _r
     rec = get_recommendation(rec_id)
     if rec and rec["status"] == "pending" and rec.get("recommended_price"):
         decide_recommendation(rec_id, "approved", rec["recommended_price"],
@@ -476,6 +513,9 @@ def quick_approve(rec_id):
 
 @app.route("/recommendations/<int:rec_id>/reject")
 def quick_reject(rec_id):
+    _r = _readonly_block()
+    if _r:
+        return _r
     rec = get_recommendation(rec_id)
     if rec and rec["status"] == "pending":
         decide_recommendation(rec_id, "rejected", None, "Rejected via email link",
@@ -506,7 +546,7 @@ BASELINE_HTML = """
  th{background:#f5f7f9}
  .flash{background:#e7f6ee;color:#166b3d;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600}
 </style></head><body>
-<div class="header"><b>Market baseline</b><a href="/">← Home</a></div>
+{{ nav|safe }}
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
   <div class="card">
@@ -544,7 +584,18 @@ BASELINE_HTML = """
 
 @app.route("/baseline", methods=["GET", "POST"])
 def baseline_page():
+    # Read-only mode: the collector owns market_baseline and collector_ro doesn't
+    # map it, so querying local SQLite here would 500 (no such table). Link out.
+    if _COLLECTOR is not None:
+        return render_template_string(
+            MANAGE_HTML, title="Market baseline",
+            message="Competitor baseline data is uploaded to and stored on the "
+                    "collector. This dashboard reads the collector read-only.",
+            collector_url=COLLECTOR_STATUS_URL)
     if request.method == "POST":
+        r = _readonly_block()
+        if r:
+            return r
         f = request.files.get("csv")
         if f and f.filename:
             fd, tmp = tempfile.mkstemp(suffix=".csv")
@@ -596,12 +647,13 @@ PRODUCTS_HTML = """
  a.edit{color:#0e5c5b;text-decoration:none;font-weight:600}
  .muted{color:#8a94a2}
 </style></head><body>
-<div class="header"><b>Products</b><div><a href="/">Home</a><a href="/accounts">Accounts</a></div></div>
+{{ nav|safe }}
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
   <div class="card">
     <div class="title">Add a product</div>
-    {% if not accounts %}<div class="muted">Add a seller account first on the <a href="/accounts">Accounts</a> page.</div>{% else %}
+    {% if collector_mode %}<div class="muted">The watchlist is managed on the collector — this dashboard is read-only. <a class="edit" href="{{ collector_url }}" target="_blank" rel="noopener">Add or edit products on the collector &#8599;</a></div>
+    {% elif not accounts %}<div class="muted">Add a seller account first on the <a href="/accounts">Accounts</a> page.</div>{% else %}
     <form method="POST" action="/products/add">
       <div style="font-size:11px;color:#8a94a2;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">Amazon fills this from the ASIN</div>
       <div class="grid">
@@ -635,8 +687,9 @@ PRODUCTS_HTML = """
         <td>{{ "%.2f"|format(p.floor_price) }} / {{ "%.2f"|format(p.ceiling_price) }}</td>
         <td>{% if p.active %}active{% else %}<span class="muted">paused</span>{% endif %}</td>
         <td>
-          <a class="edit" href="/products/{{ p.account_id }}/{{ p.asin }}/edit">Edit</a> ·
-          <a class="edit" href="/products/{{ p.account_id }}/{{ p.asin }}/toggle">{{ "Pause" if p.active else "Resume" }}</a>
+          {% if collector_mode %}<span class="muted">read-only</span>
+          {% else %}<a class="edit" href="/products/{{ p.account_id }}/{{ p.asin }}/edit">Edit</a> ·
+          <a class="edit" href="/products/{{ p.account_id }}/{{ p.asin }}/toggle">{{ "Pause" if p.active else "Resume" }}</a>{% endif %}
         </td>
       </tr>
       {% else %}<tr><td colspan="7" class="muted">None yet.</td></tr>{% endfor %}
@@ -704,7 +757,7 @@ ACCOUNTS_HTML = """
  .flash{background:#e7f6ee;color:#166b3d;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600}
  .hint{font-size:11px;color:#8a94a2}
 </style></head><body>
-<div class="header"><b>Accounts</b> <a href="/">Home</a> <a href="/products">Products</a></div>
+{{ nav|safe }}
 <div class="wrap">
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
   <div class="card">
@@ -751,6 +804,9 @@ def _int_or_none(v):
 
 @app.route("/products/add", methods=["POST"])
 def products_add():
+    r = _readonly_block()
+    if r:
+        return r
     f = request.form
     asin = f["asin"].strip()
     account_id = f["account_id"]
@@ -794,6 +850,9 @@ def products_add():
 
 @app.route("/products/<account_id>/<asin>/edit", methods=["GET", "POST"])
 def products_edit(account_id, asin):
+    r = _readonly_block()
+    if r:
+        return r
     p = get_asin(account_id, asin)
     if not p:
         return redirect("/products")
@@ -821,6 +880,9 @@ def products_edit(account_id, asin):
 
 @app.route("/products/<account_id>/<asin>/toggle")
 def products_toggle(account_id, asin):
+    r = _readonly_block()
+    if r:
+        return r
     p = get_asin(account_id, asin)
     if p:
         set_asin_active(account_id, asin, not p["active"])
@@ -829,11 +891,23 @@ def products_toggle(account_id, asin):
 
 @app.route("/accounts")
 def accounts_page():
+    # On Railway the collector is read-only and has no local `accounts` table
+    # (this is what used to 500). Account management lives on the collector, so
+    # link out instead of querying SQLite.
+    if _COLLECTOR is not None:
+        return render_template_string(
+            MANAGE_HTML, title="Accounts",
+            message="Seller accounts are configured on the collector. This dashboard "
+                    "reads the collector read-only, so account changes are made there.",
+            collector_url=COLLECTOR_STATUS_URL)
     return render_template_string(ACCOUNTS_HTML, accounts=get_accounts())
 
 
 @app.route("/accounts/add", methods=["POST"])
 def accounts_add():
+    r = _readonly_block()
+    if r:
+        return r
     f = request.form
     upsert_account(f["account_id"].strip(), f.get("seller_id"),
                    f.get("marketplace_id") or "A1F83G8C2ARO7P",
@@ -845,6 +919,9 @@ def accounts_add():
 
 @app.route("/product/<account_id>/<asin>/import-bsr", methods=["POST"])
 def product_import_bsr(account_id, asin):
+    r = _readonly_block()
+    if r:
+        return r
     f = request.files.get("csv")
     if f and f.filename:
         import tempfile, os
