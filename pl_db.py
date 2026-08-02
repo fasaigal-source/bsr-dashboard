@@ -969,14 +969,27 @@ def get_sync_state(account_id, db_path=DB_PATH):
 
 def set_sync_state(account_id, earliest_synced, latest_synced, db_path=DB_PATH):
     conn = get_db(db_path)
-    conn.execute("""
-        INSERT INTO pl_sync_state (account_id, earliest_synced, latest_synced, last_run_at)
-        VALUES (?,?,?,?)
-        ON CONFLICT(account_id) DO UPDATE SET
-            earliest_synced = MIN(COALESCE(earliest_synced, excluded.earliest_synced), excluded.earliest_synced),
-            latest_synced = MAX(COALESCE(latest_synced, excluded.latest_synced), excluded.latest_synced),
-            last_run_at = excluded.last_run_at
-    """, (account_id, earliest_synced, latest_synced, _now()))
+    if db.is_postgres():
+        # Postgres: scalar min/max are LEAST/GREATEST (MIN/MAX are aggregates only),
+        # and in ON CONFLICT DO UPDATE the existing row must be qualified
+        # (pl_sync_state.col) to disambiguate from the proposed row (excluded.col).
+        conn.execute("""
+            INSERT INTO pl_sync_state (account_id, earliest_synced, latest_synced, last_run_at)
+            VALUES (?,?,?,?)
+            ON CONFLICT(account_id) DO UPDATE SET
+                earliest_synced = LEAST(COALESCE(pl_sync_state.earliest_synced, excluded.earliest_synced), excluded.earliest_synced),
+                latest_synced = GREATEST(COALESCE(pl_sync_state.latest_synced, excluded.latest_synced), excluded.latest_synced),
+                last_run_at = excluded.last_run_at
+        """, (account_id, earliest_synced, latest_synced, _now()))
+    else:
+        conn.execute("""
+            INSERT INTO pl_sync_state (account_id, earliest_synced, latest_synced, last_run_at)
+            VALUES (?,?,?,?)
+            ON CONFLICT(account_id) DO UPDATE SET
+                earliest_synced = MIN(COALESCE(earliest_synced, excluded.earliest_synced), excluded.earliest_synced),
+                latest_synced = MAX(COALESCE(latest_synced, excluded.latest_synced), excluded.latest_synced),
+                last_run_at = excluded.last_run_at
+        """, (account_id, earliest_synced, latest_synced, _now()))
     conn.commit()
     conn.close()
 

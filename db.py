@@ -24,7 +24,11 @@ collector.
 """
 import os
 import re
+import time
 import sqlite3
+import logging
+
+_log = logging.getLogger(__name__)
 
 try:
     import psycopg2
@@ -141,18 +145,58 @@ class _PGCursor:
 
 
 class _PGConn:
-    """sqlite3.Connection-compatible facade over a psycopg2 connection."""
-    def __init__(self, url):
+    """sqlite3.Connection-compatible facade over a psycopg2 connection.
+
+    `shared=True` marks a connection that is REUSED across many pl_db calls (the
+    sync path): its .close() is a no-op so per-call closes don't tear it down, and
+    it is disposed explicitly via close_shared_connections(). This eliminates the
+    thousands of short-lived connections a heavy pl_tracker run would otherwise open
+    over the Railway proxy — that churn was both slow and what triggered the drops.
+    """
+    def __init__(self, url, shared=False):
+        self._url = url
+        self._shared = shared
+        self._open()
+
+    def _open(self):
         # Railway requires TLS (default); a local Postgres has no SSL, so allow an
-        # override via DB_SSLMODE=disable for local testing. Production leaves it unset.
-        self._c = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor,
-                                   connect_timeout=15,
-                                   sslmode=os.environ.get("DB_SSLMODE", "require"))
-        self._c.autocommit = False
+        # override via DB_SSLMODE=disable for local testing. Retry connect a few
+        # times with backoff so a transient proxy drop is survivable. Only
+        # OperationalError (connect/network) is retried — auth/SQL errors are not.
+        sslmode = os.environ.get("DB_SSLMODE", "require")
+        last = None
+        for attempt in range(6):
+            try:
+                self._c = psycopg2.connect(
+                    self._url, cursor_factory=psycopg2.extras.RealDictCursor,
+                    connect_timeout=15, sslmode=sslmode)
+                self._c.autocommit = False
+                return
+            except psycopg2.OperationalError as e:
+                last = e
+                wait = min(2 ** attempt, 15)   # 1, 2, 4, 8, 15, 15
+                _log.warning("PG connect failed (%s); retry %d/6 in %ds",
+                             str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__,
+                             attempt + 1, wait)
+                time.sleep(wait)
+        raise last
+
+    def _reconnect(self):
+        try:
+            self._c.close()
+        except Exception:
+            pass
+        self._open()
 
     def execute(self, sql, params=()):
-        cur = _PGCursor(self._c.cursor())
-        return cur.execute(sql, params)
+        # If the (long-lived, shared) connection dropped mid-run, reconnect once and
+        # retry. Only connection-level failures trigger this; real SQL errors raise.
+        try:
+            return _PGCursor(self._c.cursor()).execute(sql, params)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+            _log.warning("PG connection lost mid-execute (%s); reconnecting once", type(e).__name__)
+            self._reconnect()
+            return _PGCursor(self._c.cursor()).execute(sql, params)
 
     def executemany(self, sql, seq):
         return _PGCursor(self._c.cursor()).executemany(sql, seq)
@@ -176,7 +220,19 @@ class _PGConn:
         self._c.rollback()
 
     def close(self):
+        # A shared connection is kept alive across pl_db calls; only
+        # close_shared_connections() actually tears it down. A normal (per-call)
+        # connection closes immediately, as sqlite3 would.
+        if self._shared:
+            return
         self._c.close()
+
+    def dispose(self):
+        """Really close, even when shared."""
+        try:
+            self._c.close()
+        except Exception:
+            pass
 
     # context-manager parity with sqlite3 (commit on clean exit)
     def __enter__(self):
@@ -196,11 +252,43 @@ def _split_statements(script):
     return [s for s in re.split(r";\s*\n", script) if s.strip()]
 
 
+# ── connection reuse (opt-in) ────────────────────────────────────────────────
+# Off by default: the dashboard is multi-threaded (gunicorn gthread workers) and
+# must keep per-request connections — a psycopg2 connection is not thread-safe.
+# The pl_tracker sync is SINGLE-THREADED and write-heavy, so it turns this on to
+# reuse ONE connection for the whole run (see set_connection_reuse()).
+_REUSE = False
+_SHARED = {}   # pg url -> shared _PGConn
+
+
+def set_connection_reuse(on=True):
+    """Enable/disable reusing a single Postgres connection across connect() calls.
+    Use ONLY from single-threaded, one-process jobs (the sync). Turning it off
+    disposes any shared connection."""
+    global _REUSE
+    _REUSE = bool(on)
+    if not on:
+        close_shared_connections()
+
+
+def close_shared_connections():
+    for c in list(_SHARED.values()):
+        c.dispose()
+    _SHARED.clear()
+
+
 def connect(db_path="bsr_history.db", url=None):
     """The single entry point. Returns a connection whose .execute() takes
     `?`-placeholder SQL on BOTH backends."""
     if is_postgres(url):
-        return _PGConn(_pg_url(url))
+        u = _pg_url(url)
+        if _REUSE:
+            c = _SHARED.get(u)
+            if c is None:
+                c = _PGConn(u, shared=True)
+                _SHARED[u] = c
+            return c
+        return _PGConn(u)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
