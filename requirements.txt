@@ -1,0 +1,8 @@
+# Web dashboard (Module 1 + Module 2) — Railway deploy
+flask>=3.0.0
+gunicorn>=21.2.0
+psycopg2-binary>=2.9.9      # Postgres driver (Module 2 DB + read-only collector)
+plotly>=5.0.0              # Module 2 charts
+httpx>=0.24.0              # pulled in via pl_tracker at import
+python-amazon-sp-api>=0.8.0 # SP-API enrichment on SKU detail pages (optional creds)
+apscheduler>=3.10.0        # retained for parity with local env

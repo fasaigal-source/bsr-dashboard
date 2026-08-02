@@ -1,0 +1,43 @@
+# ── WHITELIST .gitignore ─────────────────────────────────────────────────────
+# Ignore EVERYTHING, then re-include only the exact files the Railway dashboard
+# service needs. This makes it impossible to accidentally commit secrets
+# (config.json with Amazon SP-API creds, _archive/ copies, deploy docs that
+# contain DB connection strings) or the 150 MB .db files.
+#
+# The leading "/" anchors each allow-rule to the repo ROOT, so _archive/.../*.py
+# and bsr-collector/*.py stay ignored.
+
+*
+
+# config / build
+!/.gitignore
+!/Procfile
+!/requirements.txt
+!/.python-version
+
+# app entry + shared Flask app
+!/dashboard.py
+!/dashboard_app.py
+!/dashboard_module1.py
+!/dashboard_module2.py
+
+# data layer + read-only collector mapping
+!/db.py
+!/collector_ro.py
+
+# Module 1 library (read-only on Railway)
+!/module1_collector.py
+!/module1_db.py
+
+# Module 2 (P&L) library
+!/pl_db.py
+!/pl_cogs.py
+!/pl_ads.py
+!/pl_postage.py
+!/pl_price.py
+!/pl_amazon.py
+!/pl_tracker.py
+
+# seed CSVs the app reads at boot
+!/sku_aliases.csv
+!/price_families.csv
