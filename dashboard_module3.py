@@ -107,7 +107,7 @@ PPC_HTML = """
     <table style="margin-top:10px;">
       <thead><tr><th>ASIN</th><th>Ad spend</th><th>Revenue (settled)</th><th>TACOS</th></tr></thead>
       <tbody>
-      {% for r in tacos.per_asin[:100] %}
+      {% for r in tacos.per_asin[:20] %}
         <tr>
           <td>{{ r.asin }}</td>
           <td>£{{ "%.2f"|format(r.spend) }}</td>
@@ -117,7 +117,7 @@ PPC_HTML = """
       {% endfor %}
       </tbody>
     </table>
-    <div class="muted" style="margin-top:6px;">Per-ASIN revenue is matched via your SKU→ASIN map; an ASIN with spend but no matched revenue shows ∞ (add its SKU on COGS &amp; pricing to resolve).</div>
+    <div class="muted" style="margin-top:6px;">Top 20 ASINs by ad spend (of {{ tacos.per_asin|length }}). Per-ASIN revenue is matched via your SKU→ASIN map; an ASIN with spend but no matched revenue shows ∞ (add its SKU on COGS &amp; pricing to resolve).</div>
   </div>
   {% endif %}
 
