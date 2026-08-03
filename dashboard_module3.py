@@ -105,7 +105,7 @@ PPC_HTML = """
         <tbody>
         {% for r in terms %}
           <tr>
-            <td>{{ r.search_term }}</td>
+            <td><a href="/ppc/term/{{ r.search_term|urlencode }}?account={{ account_filter }}">{{ r.search_term }}</a></td>
             <td><span class="pill {{ 'product' if r.targeting_type=='product' else '' }}">{{ r.targeting_type }}</span></td>
             <td>{{ r.campaigns }}</td>
             <td>{{ r.impressions or 0 }}</td>
@@ -126,7 +126,7 @@ PPC_HTML = """
         <tbody>
         {% for r in campaigns %}
           <tr>
-            <td>{{ r.campaign_name or r.campaign_id }}</td>
+            <td><a href="/ppc/campaign/{{ r.campaign_id }}?account={{ account_filter }}">{{ r.campaign_name or r.campaign_id }}</a></td>
             <td>{{ r.terms }}</td>
             <td>{{ r.clicks or 0 }}</td>
             <td>£{{ "%.2f"|format(r.spend or 0) }}</td>
@@ -210,3 +210,168 @@ def ppc_upload():
     finally:
         os.remove(tmp)
     return redirect(f"/ppc?account={account_id}")
+
+
+# ── drill-down: one campaign or one search term, by hour of day ──────────────
+
+DETAIL_HTML = """
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title }} — PPC — BSR Repricer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef1f4;color:#12161c;margin:0}
+ .wrap{max-width:1400px;margin:22px auto;padding:0 20px}
+ .card{background:#fff;border-radius:12px;padding:20px 22px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:18px}
+ h2{margin:0 0 4px;font-size:17px} .muted{color:#8a94a2;font-size:13px}
+ a{color:#0e5c5b}
+ .kpis{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px}
+ .kpi{flex:1;min-width:120px;background:#f7fafa;border:1px solid #e4edec;border-radius:10px;padding:10px 12px}
+ .kpi .lab{font-size:11px;color:#8a94a2;text-transform:uppercase;letter-spacing:.4px}
+ .kpi .val{font-size:19px;font-weight:800;margin-top:3px;font-family:ui-monospace,Menlo,monospace}
+ .charts{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+ @media(max-width:1000px){.charts{grid-template-columns:1fr}}
+ table{width:100%;border-collapse:collapse;font-size:13px}
+ th,td{padding:7px 9px;text-align:right;border-top:1px solid #eef1f4;white-space:nowrap}
+ th:first-child,td:first-child{text-align:left}
+ th{color:#8a94a2;font-size:11px;text-transform:uppercase}
+ tr.waste{background:#fdecee}
+ tr.win{background:#eefaf0}
+ .tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:9px}
+ .tag.waste{background:#f9d6da;color:#9e2d3c}
+ .tag.win{background:#cdefd6;color:#166b3d}
+</style></head><body>
+{{ nav|safe }}
+<div class="wrap">
+  <div class="card">
+    <div class="muted"><a href="/ppc?account={{ account_filter }}">← PPC overview</a></div>
+    <h2 style="margin-top:8px;">{{ title }}</h2>
+    <div class="muted">{{ subtitle }} · {{ totals.date_min }} → {{ totals.date_max }}</div>
+    <div class="kpis">
+      <div class="kpi"><div class="lab">Spend</div><div class="val">£{{ "%.2f"|format(totals.spend or 0) }}</div></div>
+      <div class="kpi"><div class="lab">Ad sales</div><div class="val">£{{ "%.2f"|format(totals.sales or 0) }}</div></div>
+      <div class="kpi"><div class="lab">ACOS</div><div class="val">{{ "%.0f%%"|format(100*(totals.spend or 0)/(totals.sales or 1)) if totals.sales else "—" }}</div></div>
+      <div class="kpi"><div class="lab">Clicks</div><div class="val">{{ totals.clicks or 0 }}</div></div>
+      <div class="kpi"><div class="lab">Orders</div><div class="val">{{ totals.orders or 0 }}</div></div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="card"><h2>By hour of day</h2><div class="muted">When this {{ kind }} spends vs converts — decide run/pause hours.</div><canvas id="hourChart" height="150"></canvas></div>
+    <div class="card"><h2>By day</h2><canvas id="dayChart" height="150"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h2>Hour-of-day breakdown</h2>
+    <div class="muted">Every hour 0–23. <span class="tag waste">WASTING</span> = spend but zero sales (pause candidate);
+      <span class="tag win">CONVERTS</span> = has sales. Sums across all days in the report.</div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>Hour</th><th>Impr</th><th>Clicks</th><th>Spend</th><th>Orders</th><th>Sales</th><th>ROAS</th><th>ACOS</th><th></th></tr></thead>
+      <tbody>
+      {% for h in hours %}
+        <tr class="{{ 'waste' if (h.spend and not h.sales) else ('win' if h.sales else '') }}">
+          <td>{{ '%02d:00'|format(h.hour) }}</td>
+          <td>{{ h.impressions or 0 }}</td>
+          <td>{{ h.clicks or 0 }}</td>
+          <td>£{{ "%.2f"|format(h.spend or 0) }}</td>
+          <td>{{ h.orders or 0 }}</td>
+          <td>£{{ "%.2f"|format(h.sales or 0) }}</td>
+          <td>{{ "%.2f×"|format((h.sales or 0)/(h.spend or 1)) if h.spend else "—" }}</td>
+          <td>{{ "%.0f%%"|format(100*(h.spend or 0)/(h.sales or 1)) if h.sales else "—" }}</td>
+          <td>{% if h.spend and not h.sales %}<span class="tag waste">WASTING</span>{% elif h.sales %}<span class="tag win">CONVERTS</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>{{ related_title }}</h2>
+    <table>
+      <thead><tr><th>{{ related_col }}</th><th>Clicks</th><th>Spend</th><th>Orders</th><th>Sales</th><th>ACOS</th></tr></thead>
+      <tbody>
+      {% for r in related %}
+        <tr>
+          <td>{{ related_link(r)|safe }}</td>
+          <td>{{ r.clicks or 0 }}</td>
+          <td>£{{ "%.2f"|format(r.spend or 0) }}</td>
+          <td>{{ r.orders or 0 }}</td>
+          <td>£{{ "%.2f"|format(r.sales or 0) }}</td>
+          <td>{{ "%.0f%%"|format(100*(r.spend or 0)/(r.sales or 1)) if r.sales else "—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<script>
+  var HOUR = {{ hour_json|safe }};
+  var DAY = {{ day_json|safe }};
+  function mk(id, labels, spend, sales){
+    if(!document.getElementById(id)) return;
+    new Chart(document.getElementById(id), {type:'bar',
+      data:{labels:labels, datasets:[
+        {label:'Spend (£)', data:spend, backgroundColor:'#0e5c5b'},
+        {label:'Ad sales (£)', data:sales, backgroundColor:'#8fcf9a'}]},
+      options:{responsive:true, plugins:{legend:{position:'top'}}, scales:{y:{beginAtZero:true}}}});
+  }
+  mk('hourChart', HOUR.map(d=>d.hour+':00'), HOUR.map(d=>d.spend), HOUR.map(d=>d.sales));
+  mk('dayChart', DAY.map(d=>d.date), DAY.map(d=>d.spend), DAY.map(d=>d.sales));
+</script>
+</body></html>
+"""
+
+
+def _hours_full(rows):
+    """Fill 0..23 so every hour shows (a blank hour = ad not spending then)."""
+    by = {r["hour"]: r for r in rows}
+    out = []
+    for h in range(24):
+        r = by.get(h) or {}
+        out.append({"hour": h, "impressions": r.get("impressions") or 0,
+                    "clicks": r.get("clicks") or 0, "spend": r.get("spend") or 0,
+                    "orders": r.get("orders") or 0, "sales": r.get("sales") or 0})
+    return out
+
+
+@app.route("/ppc/campaign/<campaign_id>")
+def ppc_campaign(campaign_id):
+    account_filter = request.args.get("account", "all")
+    totals = pl_ppc.entity_totals(account_filter, campaign_id=campaign_id)
+    hours = _hours_full(pl_ppc.by_hour(account_filter, campaign_id=campaign_id))
+    day = pl_ppc.by_day(account_filter, campaign_id=campaign_id)
+    related = pl_ppc.terms_for_campaign(account_filter, campaign_id)
+
+    def related_link(r):
+        return (f'<a href="/ppc/term/{r["search_term"]}?account={account_filter}">{r["search_term"]}</a>'
+                f' <span class="muted">· {r.get("targeting_type","")}</span>')
+    return render_template_string(
+        DETAIL_HTML, title=(totals.get("campaign_name") or campaign_id),
+        subtitle=f"Campaign · {totals.get('terms',0)} search terms", kind="campaign",
+        account_filter=account_filter, totals=totals, hours=hours,
+        related=related, related_title="Search terms in this campaign",
+        related_col="Search term", related_link=related_link,
+        hour_json=json.dumps([{"hour": h["hour"], "spend": h["spend"], "sales": h["sales"]} for h in hours]),
+        day_json=json.dumps(day))
+
+
+@app.route("/ppc/term/<path:search_term>")
+def ppc_term(search_term):
+    account_filter = request.args.get("account", "all")
+    totals = pl_ppc.entity_totals(account_filter, search_term=search_term)
+    hours = _hours_full(pl_ppc.by_hour(account_filter, search_term=search_term))
+    day = pl_ppc.by_day(account_filter, search_term=search_term)
+    related = pl_ppc.campaigns_for_term(account_filter, search_term)
+
+    def related_link(r):
+        return (f'<a href="/ppc/campaign/{r["campaign_id"]}?account={account_filter}">'
+                f'{r.get("campaign_name") or r["campaign_id"]}</a>')
+    return render_template_string(
+        DETAIL_HTML, title=search_term,
+        subtitle=f"Search term · in {totals.get('campaigns',0)} campaign(s)", kind="term",
+        account_filter=account_filter, totals=totals, hours=hours,
+        related=related, related_title="Campaigns running this term",
+        related_col="Campaign", related_link=related_link,
+        hour_json=json.dumps([{"hour": h["hour"], "spend": h["spend"], "sales": h["sales"]} for h in hours]),
+        day_json=json.dumps(day))

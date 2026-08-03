@@ -326,6 +326,20 @@ def _acct_where(account_id):
     return "", []
 
 
+def _filters(account_id=None, campaign_id=None, search_term=None):
+    """Build a WHERE clause for the drill-downs: account + optional campaign +
+    optional search term."""
+    clauses, params = [], []
+    if account_id and account_id != "all":
+        clauses.append("account_id=?"); params.append(account_id)
+    if campaign_id:
+        clauses.append("campaign_id=?"); params.append(campaign_id)
+    if search_term:
+        clauses.append("search_term=?"); params.append(search_term)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
 def get_totals(account_id="all", db_path=DB_PATH):
     conn = get_db(db_path)
     w, p = _acct_where(account_id)
@@ -341,9 +355,9 @@ def get_totals(account_id="all", db_path=DB_PATH):
     return dict(row) if row else {}
 
 
-def by_day(account_id="all", db_path=DB_PATH):
+def by_day(account_id="all", campaign_id=None, search_term=None, db_path=DB_PATH):
     conn = get_db(db_path)
-    w, p = _acct_where(account_id)
+    w, p = _filters(account_id, campaign_id, search_term)
     rows = conn.execute(f"""
         SELECT date, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
                ROUND(SUM(spend),2) AS spend, SUM(orders) AS orders, ROUND(SUM(sales),2) AS sales
@@ -354,15 +368,60 @@ def by_day(account_id="all", db_path=DB_PATH):
     return [dict(r) for r in rows]
 
 
-def by_hour(account_id="all", db_path=DB_PATH):
+def by_hour(account_id="all", campaign_id=None, search_term=None, db_path=DB_PATH):
+    """Hour-of-day breakdown (0..23). This is the day-parting view: where does
+    spend convert vs waste, by time of day, optionally for one campaign or term."""
     conn = get_db(db_path)
-    w, p = _acct_where(account_id)
-    extra = " AND hour >= 0" if w else " WHERE hour >= 0"
+    w, p = _filters(account_id, campaign_id, search_term)
+    extra = (" AND hour >= 0") if w else (" WHERE hour >= 0")
     rows = conn.execute(f"""
         SELECT hour, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
                ROUND(SUM(spend),2) AS spend, SUM(orders) AS orders, ROUND(SUM(sales),2) AS sales
         FROM ppc_search_terms{w}{extra}
         GROUP BY hour ORDER BY hour
+    """, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def entity_totals(account_id="all", campaign_id=None, search_term=None, db_path=DB_PATH):
+    conn = get_db(db_path)
+    w, p = _filters(account_id, campaign_id, search_term)
+    row = conn.execute(f"""
+        SELECT COUNT(DISTINCT search_term) AS terms, COUNT(DISTINCT campaign_id) AS campaigns,
+               MAX(campaign_name) AS campaign_name,
+               SUM(impressions) AS impressions, SUM(clicks) AS clicks,
+               ROUND(SUM(spend),2) AS spend, SUM(orders) AS orders, ROUND(SUM(sales),2) AS sales,
+               MIN(date) AS date_min, MAX(date) AS date_max
+        FROM ppc_search_terms{w}
+    """, p).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def terms_for_campaign(account_id, campaign_id, limit=500, db_path=DB_PATH):
+    conn = get_db(db_path)
+    w, p = _filters(account_id, campaign_id)
+    rows = conn.execute(f"""
+        SELECT search_term, targeting_type, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
+               ROUND(SUM(spend),2) AS spend, SUM(orders) AS orders, ROUND(SUM(sales),2) AS sales
+        FROM ppc_search_terms{w}
+        GROUP BY search_term, targeting_type
+        ORDER BY SUM(spend) DESC LIMIT {int(limit)}
+    """, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def campaigns_for_term(account_id, search_term, db_path=DB_PATH):
+    conn = get_db(db_path)
+    w, p = _filters(account_id, search_term=search_term)
+    rows = conn.execute(f"""
+        SELECT campaign_id, campaign_name, SUM(clicks) AS clicks,
+               ROUND(SUM(spend),2) AS spend, SUM(orders) AS orders, ROUND(SUM(sales),2) AS sales
+        FROM ppc_search_terms{w}
+        GROUP BY campaign_id, campaign_name
+        ORDER BY SUM(spend) DESC
     """, p).fetchall()
     conn.close()
     return [dict(r) for r in rows]
