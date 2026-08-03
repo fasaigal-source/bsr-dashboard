@@ -51,7 +51,7 @@ import os
 import re
 import sqlite3
 import db
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 log = logging.getLogger(__name__)
 DB_PATH = "bsr_history.db"   # same DB file as the rest of Module 2
@@ -726,8 +726,18 @@ def get_coverage_warning(account_id=None, viewed_start=None, viewed_end=None, db
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     v_end = viewed_end or today
 
+    # Amazon's ad reports lag ~1-2 days (today's and often yesterday's spend
+    # isn't final yet), so ad coverage will almost always end a day or two before
+    # a range that runs "up to today". Don't cry "incomplete" over that normal
+    # trailing lag — only warn when ad data ends MORE than LAG_DAYS before the
+    # range end (a genuine gap worth uploading for).
+    LAG_DAYS = 3
+    try:
+        end_cutoff = (datetime.strptime(v_end, "%Y-%m-%d") - timedelta(days=LAG_DAYS)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        end_cutoff = v_end
     gap_start = bool(viewed_start) and viewed_start < cov_min
-    gap_end = v_end > cov_max
+    gap_end = cov_max < end_cutoff
     if not gap_start and not gap_end:
         return None
     return dict(has_data=True, cov_min=cov_min, cov_max=cov_max,
