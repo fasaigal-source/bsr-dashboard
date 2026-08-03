@@ -20,6 +20,7 @@
 !/dashboard_app.py
 !/dashboard_module1.py
 !/dashboard_module2.py
+!/dashboard_module3.py
 
 # data layer + read-only collector mapping
 !/db.py
@@ -37,6 +38,7 @@
 !/pl_price.py
 !/pl_amazon.py
 !/pl_tracker.py
+!/pl_ppc.py
 
 # seed CSVs the app reads at boot
 !/sku_aliases.csv
