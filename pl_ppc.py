@@ -461,6 +461,68 @@ def campaigns_for_term(account_id, search_term, db_path=DB_PATH):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TACOS — ad spend ÷ settlement-anchored total revenue (Module 2). Account-level
+# headline + per-ASIN. NOT per-search-term (TACOS is undefined at term grain —
+# the search-term table keeps ACOS). Two clocks: ad spend is click-date, revenue
+# is settlement-date. Gated on sync freshness so it isn't divided into frozen revenue.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_tacos(account_id="all", db_path=DB_PATH):
+    import pl_ads
+    conn = get_db(db_path)
+    try:
+        row = conn.execute("SELECT MAX(latest_synced) AS m FROM pl_sync_state").fetchone()
+        last_synced = row["m"] if row and row["m"] else None
+    except Exception:
+        last_synced = None
+    conn.close()
+
+    cov_min, cov_max = pl_ads.get_ad_data_coverage(account_id=account_id, db_path=db_path)
+    if not cov_min:
+        return {"has_ad": False}
+
+    ad_by_asin = pl_ads.get_ad_spend_by_asin(account_id, cov_min, cov_max, db_path=db_path)
+    total_spend = round(sum((v.get("spend") or 0) for v in ad_by_asin.values()), 2)
+
+    conn = get_db(db_path)
+    acc = " AND account_id=?" if (account_id and account_id != "all") else ""
+    accli = " AND li.account_id=?" if (account_id and account_id != "all") else ""
+    ap = [account_id] if acc else []
+    # total settled gross (ex-VAT) over the ad-coverage window — the TACOS denominator
+    total_rev = conn.execute(
+        f"SELECT ROUND(SUM(sale_price_exvat),2) AS r FROM pl_line_items "
+        f"WHERE substr(posted_date,1,10) >= ? AND substr(posted_date,1,10) <= ?{acc}",
+        (cov_min, cov_max, *ap)).fetchone()["r"] or 0.0
+    # per-ASIN revenue via the sku -> cogs_sku_asin.asin map (pl_line_items.asin is
+    # only sparsely populated, so we join on SKU which is always present)
+    rev_rows = conn.execute(
+        f"""SELECT csa.asin AS asin, ROUND(SUM(li.sale_price_exvat),2) AS revenue
+            FROM pl_line_items li JOIN cogs_sku_asin csa ON li.sku = csa.variant_sku
+            WHERE substr(li.posted_date,1,10) >= ? AND substr(li.posted_date,1,10) <= ?{accli}
+            GROUP BY csa.asin""",
+        (cov_min, cov_max, *ap)).fetchall()
+    conn.close()
+    rev_by_asin = {r["asin"]: (r["revenue"] or 0.0) for r in rev_rows}
+
+    per_asin = []
+    for asin, v in ad_by_asin.items():
+        rev = rev_by_asin.get(asin, 0.0)
+        spend = round(v.get("spend") or 0, 2)
+        per_asin.append({
+            "asin": asin, "spend": spend, "ad_sales": round(v.get("ad_sales") or 0, 2),
+            "revenue": rev, "tacos": (spend / rev) if rev else None})
+    per_asin.sort(key=lambda x: -(x["spend"] or 0))
+
+    account_tacos = (total_spend / total_rev) if total_rev else None
+    # stale = revenue hasn't caught up to the ad window's end (frozen relative to spend)
+    stale = (last_synced is None) or (str(last_synced)[:10] < cov_max)
+    return {"has_ad": True, "cov_min": cov_min, "cov_max": cov_max,
+            "total_spend": total_spend, "total_rev": total_rev,
+            "account_tacos": account_tacos, "per_asin": per_asin,
+            "last_synced": last_synced, "stale": stale}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PHASE C — day-parting schedule + action log
 # ─────────────────────────────────────────────────────────────────────────────
 

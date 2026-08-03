@@ -91,6 +91,36 @@ PPC_HTML = """
     </div>
   </div>
 
+  {% if tacos and tacos.has_ad %}
+  <div class="card">
+    <h2>TACOS <span class="muted">— ad spend ÷ total settled revenue · {{ tacos.cov_min }} → {{ tacos.cov_max }}</span></h2>
+    {% if tacos.stale %}
+    <div style="background:#fbf1dd;color:#8a5906;padding:10px 14px;border-radius:10px;margin:10px 0;font-size:13px;">
+      ⚠ Revenue is behind the ad data (P&amp;L synced to <b>{{ tacos.last_synced[:10] if tacos.last_synced else '—' }}</b>, ads to <b>{{ tacos.cov_max }}</b>) — run the P&amp;L sync so TACOS isn't divided into frozen revenue. The figure below is understated until it catches up.</div>
+    {% endif %}
+    <div class="kpis" style="margin-top:8px;">
+      <div class="kpi"><div class="lab">Account TACOS</div><div class="val">{{ "%.1f%%"|format(100*tacos.account_tacos) if tacos.account_tacos is not none else "—" }}</div></div>
+      <div class="kpi"><div class="lab">Ad spend</div><div class="val">£{{ "%.2f"|format(tacos.total_spend) }}</div></div>
+      <div class="kpi"><div class="lab">Total revenue (settled)</div><div class="val">£{{ "%.2f"|format(tacos.total_rev) }}</div></div>
+    </div>
+    <div class="muted" style="margin-top:8px;"><b>Two clocks:</b> ad spend is <b>click-date</b>, revenue is <b>settlement-date</b> — they won't reconcile to the penny (Amazon backdates ad conversions). TACOS is per-ASIN here; ACOS in the search-term table is per term.</div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>ASIN</th><th>Ad spend</th><th>Revenue (settled)</th><th>TACOS</th></tr></thead>
+      <tbody>
+      {% for r in tacos.per_asin[:100] %}
+        <tr>
+          <td>{{ r.asin }}</td>
+          <td>£{{ "%.2f"|format(r.spend) }}</td>
+          <td>£{{ "%.2f"|format(r.revenue) }}</td>
+          <td>{% if r.tacos is not none %}{{ "%.0f%%"|format(100*r.tacos) }}{% elif r.spend %}<span class="zero">∞ (spend, no matched revenue)</span>{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted" style="margin-top:6px;">Per-ASIN revenue is matched via your SKU→ASIN map; an ASIN with spend but no matched revenue shows ∞ (add its SKU on COGS &amp; pricing to resolve).</div>
+  </div>
+  {% endif %}
+
   <div class="charts">
     <div class="card"><h2>By day</h2><div class="muted">Spend vs ad sales per day.</div><canvas id="dayChart" height="150"></canvas></div>
     <div class="card"><h2>By hour of day</h2><div class="muted">When your spend and sales happen — aggregated across the range.</div><canvas id="hourChart" height="150"></canvas></div>
@@ -183,9 +213,13 @@ def ppc_page():
     hour = pl_ppc.by_hour(account_filter) if totals.get("rows") else []
     terms = pl_ppc.by_search_term(account_filter, limit=500) if totals.get("rows") else []
     campaigns = pl_ppc.by_campaign(account_filter) if totals.get("rows") else []
+    try:
+        tacos = pl_ppc.get_tacos(account_filter)
+    except Exception:
+        tacos = {"has_ad": False}
     return render_template_string(
         PPC_HTML, accounts=accounts, account_filter=account_filter,
-        totals=totals, terms=terms, campaigns=campaigns,
+        totals=totals, terms=terms, campaigns=campaigns, tacos=tacos,
         day_json=json.dumps(day), hour_json=json.dumps(hour))
 
 
