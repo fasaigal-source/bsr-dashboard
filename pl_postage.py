@@ -209,6 +209,37 @@ def get_missing_postage_worklist(account_id=None, db_path=DB_PATH, limit=500):
     return out
 
 
+def get_missing_order_ids(account_id, limit=1000, db_path=DB_PATH):
+    """Order IDs still missing postage (up to `limit`), for the bulk 'apply to all
+    remaining' action — not capped at the worklist's 500 display limit."""
+    conn = get_db(db_path)
+    where = "WHERE postage_source IN ('missing', 'estimated', 'provisional')"
+    params = []
+    if account_id and account_id != "all":
+        where += " AND account_id=?"
+        params.append(account_id)
+    rows = conn.execute(
+        f"SELECT DISTINCT order_id FROM pl_line_items {where} ORDER BY order_id LIMIT ?",
+        (*params, limit)).fetchall()
+    conn.close()
+    return [r["order_id"] for r in rows]
+
+
+def count_missing_orders(account_id, db_path=DB_PATH):
+    """Total distinct orders still missing postage (uncapped) — for the 'N remaining'
+    count next to the bulk button."""
+    conn = get_db(db_path)
+    where = "WHERE postage_source IN ('missing', 'estimated', 'provisional')"
+    params = []
+    if account_id and account_id != "all":
+        where += " AND account_id=?"
+        params.append(account_id)
+    row = conn.execute(
+        f"SELECT COUNT(DISTINCT order_id) AS n FROM pl_line_items {where}", params).fetchone()
+    conn.close()
+    return (row["n"] if row else 0) or 0
+
+
 def _get_buyer_paid_shipping(account_id, order_ids, db_path=DB_PATH, conn=None):
     """Sums the 'ShippingCharge' component (what the BUYER paid Amazon for
     shipping on this order -- distinct from what the SELLER pays a courier,

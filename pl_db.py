@@ -296,6 +296,16 @@ def init_pl_schema(db_path=DB_PATH):
     # scan. On the real 33,720-row table this made /pl/cogs take a very long
     # time (looked like an infinite load) to build the worklist.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_canonical_only ON pl_line_items(canonical_sku)")
+    # These live in the SQLite SCHEMA string too, but that only runs on SQLite
+    # (Postgres skips executescript — migrate.py owns the tables but created NO
+    # indexes). Without idx_pl_raw_key on Postgres, every recompute_line_item
+    # full-scans ~37k pl_raw_events rows, so a reprocess/postage-apply crawled.
+    # Create them here so they exist on BOTH backends.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_raw_key ON pl_raw_events(account_id, order_id, order_item_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_raw_order ON pl_raw_events(account_id, order_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_asin ON pl_line_items(account_id, asin)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_posted ON pl_line_items(posted_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_postage_source ON pl_line_items(account_id, postage_source)")
     conn.commit()
     conn.close()
     pl_cogs.init_cogs_schema(db_path=db_path)

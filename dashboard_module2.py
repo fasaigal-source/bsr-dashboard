@@ -8,6 +8,7 @@ import os
 import io
 import csv
 import json
+import time
 from datetime import datetime, timedelta
 from flask import request, redirect, render_template_string, flash, Response
 
@@ -2421,6 +2422,8 @@ POSTAGE_HTML = """
         <input type="number" step="0.01" name="amount" placeholder="£0.00"
                {% if last_value is not none %}value="{{ '%.2f'|format(last_value) }}"{% endif %} required>
         <button class="btn" type="submit">Apply to selected</button>
+        {% if total_missing %}<button class="btn" type="submit" formaction="/pl/postage/apply-all"
+          style="background:#8a5906;" onclick="return confirm('Set this amount for ALL {{ total_missing }} remaining missing-postage orders (in batches of 1000)?')">Apply to all remaining ({{ total_missing }})</button>{% endif %}
         <span class="muted" style="font-size:11.5px;">(prefilled with your last-entered value — courier rates rarely change week to week, just confirm or adjust)</span>
       </div>
       <table>
@@ -2456,9 +2459,11 @@ def pl_postage_page():
     worklist = pl_postage.get_missing_postage_worklist(default_account) if default_account else []
     last_value = pl_postage.get_last_manual_postage_value(default_account) if default_account else None
     week_count = pl_postage.count_missing_postage_last_n_days(default_account, days=7) if default_account else 0
+    total_missing = pl_postage.count_missing_orders(default_account) if default_account else 0
     return render_template_string(
         POSTAGE_HTML, accounts=accounts, default_account=default_account,
         worklist=worklist, last_value=last_value, week_count=week_count,
+        total_missing=total_missing,
     )
 
 
@@ -2490,6 +2495,50 @@ def pl_postage_save():
         reprocessed = None
     flash(f"Set £{amount:.2f} postage for {n} order(s), now postage_source='manual'."
           + (f" Recomputed {reprocessed} line item(s)." if reprocessed is not None else ""))
+    return redirect(return_url)
+
+
+@app.route("/pl/postage/apply-all", methods=["POST"])
+def pl_postage_apply_all():
+    """Bulk-fill EVERY remaining missing-postage order for the account with one
+    value — clears the historical backlog without ticking 500 rows at a time.
+    Processed in batches so the reprocess can't time out on the remote DB; the
+    flash tells you how many remain so you can click again for the rest."""
+    account_id = request.form.get("account_id")
+    amount_raw = (request.form.get("amount") or "").strip()
+    return_url = "/pl/postage" + (f"?account={account_id}" if account_id else "")
+    if not account_id:
+        flash("No account specified.")
+        return redirect(return_url)
+    try:
+        amount = float(amount_raw)
+    except ValueError:
+        flash(f"'{amount_raw}' is not a valid number.")
+        return redirect(return_url)
+    # Process 500-order batches in a loop until either nothing's left or we hit a
+    # soft time budget (kept well under gunicorn --timeout). With idx_pl_raw_key
+    # each batch is fast, so one click clears thousands; if a big backlog can't
+    # finish in one request, the flash says how many remain — just click again.
+    deadline = time.time() + 150
+    total_set, total_reproc = 0, 0
+    while time.time() < deadline:
+        order_ids = pl_postage.get_missing_order_ids(account_id, limit=500)
+        if not order_ids:
+            break
+        pl_postage.bulk_set_manual_postage(account_id, order_ids, amount)
+        try:
+            total_reproc += (pl_tracker.reprocess_orders(account_id, order_ids) or 0)
+        except Exception as e:
+            app.logger.warning(f"apply-all reprocess failed: {e}")
+            break
+        total_set += len(order_ids)
+    remaining = pl_postage.count_missing_orders(account_id)
+    if not total_set:
+        flash("Nothing to fill — no orders are missing postage for this account.")
+    else:
+        flash(f"Set £{amount:.2f} for {total_set} order(s), recomputed {total_reproc} line item(s). "
+              + (f"{remaining} still missing — click 'Apply to all remaining' again to continue."
+                 if remaining else "All caught up — none left missing."))
     return redirect(return_url)
 
 
