@@ -484,25 +484,50 @@ def get_tacos(account_id="all", db_path=DB_PATH):
     ad_by_asin = pl_ads.get_ad_spend_by_asin(account_id, cov_min, cov_max, db_path=db_path)
     total_spend = round(sum((v.get("spend") or 0) for v in ad_by_asin.values()), 2)
 
+    import html as _html
     conn = get_db(db_path)
     acc = " AND account_id=?" if (account_id and account_id != "all") else ""
-    accli = " AND li.account_id=?" if (account_id and account_id != "all") else ""
     ap = [account_id] if acc else []
     # total settled gross (ex-VAT) over the ad-coverage window — the TACOS denominator
     total_rev = conn.execute(
         f"SELECT ROUND(SUM(sale_price_exvat),2) AS r FROM pl_line_items "
         f"WHERE substr(posted_date,1,10) >= ? AND substr(posted_date,1,10) <= ?{acc}",
         (cov_min, cov_max, *ap)).fetchone()["r"] or 0.0
-    # per-ASIN revenue via the sku -> cogs_sku_asin.asin map (pl_line_items.asin is
-    # only sparsely populated, so we join on SKU which is always present)
-    rev_rows = conn.execute(
-        f"""SELECT csa.asin AS asin, ROUND(SUM(li.sale_price_exvat),2) AS revenue
-            FROM pl_line_items li JOIN cogs_sku_asin csa ON li.sku = csa.variant_sku
-            WHERE substr(li.posted_date,1,10) >= ? AND substr(li.posted_date,1,10) <= ?{accli}
-            GROUP BY csa.asin""",
-        (cov_min, cov_max, *ap)).fetchall()
+
+    # Build SKU/canonical -> ASIN maps, normalised for two real-data quirks so the
+    # per-ASIN revenue join actually hits: (1) pl_line_items.sku stores HTML
+    # entities (e.g. 18&quot;X4) while the maps hold the decoded form (18"X4);
+    # (2) separators/aliases differ (BD-6372=P4 vs BD-6372-P4). We match on the
+    # clean canonical_sku first (alias-resolved), then fall back to a
+    # HTML-unescaped raw-sku match. Both mapping sources are used: your
+    # SKU→ASIN table (cogs_sku_asin) and Amazon's own advertised (asin, sku) pairs.
+    alias_map = {r["variant_sku"]: r["canonical_sku"]
+                 for r in conn.execute("SELECT variant_sku, canonical_sku FROM cogs_aliases").fetchall()}
+
+    def _canon(s):
+        s = s or ""
+        if s in alias_map:
+            return alias_map[s]
+        u = _html.unescape(s)
+        return alias_map.get(u, u)
+
+    canon_to_asin, sku_to_asin = {}, {}
+    for r in conn.execute("SELECT variant_sku, asin FROM cogs_sku_asin").fetchall():
+        canon_to_asin.setdefault(_canon(r["variant_sku"]), r["asin"])
+        sku_to_asin.setdefault(_html.unescape(r["variant_sku"] or ""), r["asin"])
+    for r in conn.execute("SELECT DISTINCT asin, sku FROM ad_spend WHERE sku IS NOT NULL AND sku!=''").fetchall():
+        canon_to_asin.setdefault(_canon(r["sku"]), r["asin"])
+        sku_to_asin.setdefault(_html.unescape(r["sku"] or ""), r["asin"])
+
+    rev_by_asin = {}
+    for r in conn.execute(
+            f"""SELECT canonical_sku, sku, SUM(sale_price_exvat) AS rev FROM pl_line_items
+                WHERE substr(posted_date,1,10) >= ? AND substr(posted_date,1,10) <= ?{acc}
+                GROUP BY canonical_sku, sku""", (cov_min, cov_max, *ap)).fetchall():
+        a = canon_to_asin.get(r["canonical_sku"]) or sku_to_asin.get(_html.unescape(r["sku"] or ""))
+        if a:
+            rev_by_asin[a] = rev_by_asin.get(a, 0.0) + (r["rev"] or 0.0)
     conn.close()
-    rev_by_asin = {r["asin"]: (r["revenue"] or 0.0) for r in rev_rows}
 
     per_asin = []
     for asin, v in ad_by_asin.items():
