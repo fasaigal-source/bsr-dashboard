@@ -39,6 +39,8 @@
 !/pl_amazon.py
 !/pl_tracker.py
 !/pl_ppc.py
+!/ppc_ads_api.py
+!/ppc_scheduler.py
 
 # seed CSVs the app reads at boot
 !/sku_aliases.csv

@@ -129,6 +129,39 @@ def init_ppc_schema(db_path=DB_PATH):
             created_at     TEXT NOT NULL
         )
         """,
+        # Phase C — per-campaign day-parting schedule. active=1 means the hourly
+        # scheduler manages this campaign's on/off. The simple daily ON window is
+        # [on_start_hour, on_end_hour); hour_mask (24 chars of '1'/'0') is the
+        # optional per-hour override that takes precedence when set (Phase: later).
+        f"""
+        CREATE TABLE IF NOT EXISTS ppc_campaign_schedule (
+            account_id        TEXT NOT NULL,
+            campaign_id       TEXT NOT NULL,
+            campaign_name     TEXT,
+            active            INTEGER NOT NULL DEFAULT 0,
+            on_start_hour     INTEGER NOT NULL DEFAULT 0,
+            on_end_hour       INTEGER NOT NULL DEFAULT 24,
+            hour_mask         TEXT,
+            last_desired_state TEXT,
+            last_synced_at    TEXT,
+            updated_at        TEXT,
+            PRIMARY KEY (account_id, campaign_id)
+        )
+        """,
+        # every enable/pause the scheduler (or a manual test) attempts, logged.
+        f"""
+        CREATE TABLE IF NOT EXISTS ppc_action_log (
+            id             {IDCOL},
+            account_id     TEXT NOT NULL,
+            campaign_id    TEXT,
+            campaign_name  TEXT,
+            action         TEXT,              -- 'enable' | 'pause'
+            desired_state  TEXT,              -- 'enabled' | 'paused'
+            result         TEXT,              -- 'ok' | 'error' | 'dry_run' | 'noop'
+            detail         TEXT,
+            at             TEXT NOT NULL
+        )
+        """,
     ]
     for s in stmts:
         conn.execute(s)
@@ -422,6 +455,125 @@ def campaigns_for_term(account_id, search_term, db_path=DB_PATH):
         FROM ppc_search_terms{w}
         GROUP BY campaign_id, campaign_name
         ORDER BY SUM(spend) DESC
+    """, p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE C — day-parting schedule + action log
+# ─────────────────────────────────────────────────────────────────────────────
+
+def desired_state_for_hour(sched, hour):
+    """'enabled' or 'paused' for a schedule row at a given hour (0-23). A 24-char
+    hour_mask ('1'=on) overrides the simple [on_start_hour, on_end_hour) window;
+    the window may wrap midnight (start > end)."""
+    mask = (sched.get("hour_mask") or "").strip()
+    if len(mask) == 24:
+        return "enabled" if mask[hour] == "1" else "paused"
+    s = int(sched.get("on_start_hour") or 0)
+    e = int(sched.get("on_end_hour") if sched.get("on_end_hour") is not None else 24)
+    if s <= e:
+        on = (s <= hour < e)
+    else:  # wraps midnight, e.g. 22:00 -> 06:00
+        on = (hour >= s or hour < e)
+    return "enabled" if on else "paused"
+
+
+def upsert_schedule(account_id, campaign_id, campaign_name=None, active=None,
+                    on_start_hour=None, on_end_hour=None, hour_mask=None, db_path=DB_PATH):
+    """Create or update a campaign's schedule. Only non-None fields are changed."""
+    conn = get_db(db_path)
+    now = _now()
+    existing = conn.execute(
+        "SELECT * FROM ppc_campaign_schedule WHERE account_id=? AND campaign_id=?",
+        (account_id, campaign_id)).fetchone()
+    if existing:
+        cur = dict(existing)
+        vals = dict(
+            campaign_name=campaign_name if campaign_name is not None else cur.get("campaign_name"),
+            active=int(active) if active is not None else cur.get("active"),
+            on_start_hour=int(on_start_hour) if on_start_hour is not None else cur.get("on_start_hour"),
+            on_end_hour=int(on_end_hour) if on_end_hour is not None else cur.get("on_end_hour"),
+            hour_mask=hour_mask if hour_mask is not None else cur.get("hour_mask"),
+        )
+        conn.execute("""UPDATE ppc_campaign_schedule SET campaign_name=?, active=?,
+                        on_start_hour=?, on_end_hour=?, hour_mask=?, updated_at=?
+                        WHERE account_id=? AND campaign_id=?""",
+                     (vals["campaign_name"], vals["active"], vals["on_start_hour"],
+                      vals["on_end_hour"], vals["hour_mask"], now, account_id, campaign_id))
+    else:
+        conn.execute("""INSERT INTO ppc_campaign_schedule
+                        (account_id, campaign_id, campaign_name, active, on_start_hour,
+                         on_end_hour, hour_mask, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                     (account_id, campaign_id, campaign_name, int(active or 0),
+                      int(on_start_hour if on_start_hour is not None else 0),
+                      int(on_end_hour if on_end_hour is not None else 24), hour_mask, now))
+    conn.commit()
+    conn.close()
+
+
+def get_schedules(account_id=None, active_only=False, db_path=DB_PATH):
+    conn = get_db(db_path)
+    w, p = _acct_where(account_id)
+    if active_only:
+        w = (w + " AND active=1") if w else " WHERE active=1"
+    rows = conn.execute(
+        f"SELECT * FROM ppc_campaign_schedule{w} ORDER BY campaign_name", p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_schedule(account_id, campaign_id, db_path=DB_PATH):
+    conn = get_db(db_path)
+    row = conn.execute(
+        "SELECT * FROM ppc_campaign_schedule WHERE account_id=? AND campaign_id=?",
+        (account_id, campaign_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_last_desired_state(account_id, campaign_id, state, db_path=DB_PATH):
+    conn = get_db(db_path)
+    conn.execute("""UPDATE ppc_campaign_schedule SET last_desired_state=?, last_synced_at=?
+                    WHERE account_id=? AND campaign_id=?""",
+                 (state, _now(), account_id, campaign_id))
+    conn.commit()
+    conn.close()
+
+
+def log_action(account_id, campaign_id, campaign_name, action, desired_state,
+               result, detail=None, db_path=DB_PATH):
+    conn = get_db(db_path)
+    conn.execute("""INSERT INTO ppc_action_log
+                    (account_id, campaign_id, campaign_name, action, desired_state, result, detail, at)
+                    VALUES (?,?,?,?,?,?,?,?)""",
+                 (account_id, campaign_id, campaign_name, action, desired_state,
+                  result, detail, _now()))
+    conn.commit()
+    conn.close()
+
+
+def get_action_log(account_id=None, limit=200, db_path=DB_PATH):
+    conn = get_db(db_path)
+    w, p = _acct_where(account_id)
+    rows = conn.execute(
+        f"SELECT * FROM ppc_action_log{w} ORDER BY at DESC LIMIT {int(limit)}", p).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def campaign_names(account_id=None, db_path=DB_PATH):
+    """Distinct campaigns seen in the Search Term data — the pick-list for
+    scheduling (so you schedule real campaign IDs, not typed strings)."""
+    conn = get_db(db_path)
+    w, p = _acct_where(account_id)
+    rows = conn.execute(f"""
+        SELECT campaign_id, MAX(campaign_name) AS campaign_name,
+               ROUND(SUM(spend),2) AS spend
+        FROM ppc_search_terms{w}
+        GROUP BY campaign_id ORDER BY SUM(spend) DESC
     """, p).fetchall()
     conn.close()
     return [dict(r) for r in rows]

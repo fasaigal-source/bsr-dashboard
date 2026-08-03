@@ -11,6 +11,7 @@ from flask import request, redirect, render_template_string, flash
 
 from dashboard_app import app
 import pl_ppc
+import ppc_ads_api
 from pl_db import get_accounts   # Module 2's own accounts reader (Postgres/SQLite)
 
 
@@ -74,6 +75,7 @@ PPC_HTML = """
       </label>
       <span class="muted">{% if totals.rows %}{{ totals.rows }} rows · {{ totals.date_min }} → {{ totals.date_max }}{% else %}No data yet — import a report above.{% endif %}</span>
     </form>
+    <div style="margin-top:6px;"><a class="btn" href="/ppc/schedule?account={{ account_filter }}">⏱ Day-parting schedule (auto on/off)</a></div>
   </div>
 
   {% if totals.rows %}
@@ -354,6 +356,175 @@ def ppc_campaign(campaign_id):
         related_col="Search term", related_link=related_link,
         hour_json=json.dumps([{"hour": h["hour"], "spend": h["spend"], "sales": h["sales"]} for h in hours]),
         day_json=json.dumps(day))
+
+
+# ── Phase C: day-parting schedule (auto on/off via Ads API) ──────────────────
+
+SCHEDULE_HTML = """
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Day-parting schedule — PPC — BSR Repricer</title>
+<style>
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef1f4;color:#12161c;margin:0}
+ .wrap{max-width:1300px;margin:22px auto;padding:0 20px}
+ .card{background:#fff;border-radius:12px;padding:20px 22px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:18px}
+ h2{margin:0 0 4px;font-size:17px} .muted{color:#8a94a2;font-size:13px} a{color:#0e5c5b}
+ .flash{background:#e7f6ee;color:#166b3d;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600}
+ .banner{padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:14px}
+ .banner.live{background:#e7f6ee;color:#166b3d} .banner.dry{background:#fbf1dd;color:#8a5906}
+ table{width:100%;border-collapse:collapse;font-size:13px}
+ th,td{padding:8px 9px;border-top:1px solid #eef1f4;text-align:left;vertical-align:middle}
+ th{color:#8a94a2;font-size:11px;text-transform:uppercase}
+ input[type=number]{width:64px;padding:6px;border:1px solid #dde3e9;border-radius:6px}
+ .btn{background:#0e5c5b;color:#eafcfb;border:none;border-radius:7px;padding:7px 13px;font-weight:600;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
+ .btn.sm{padding:4px 9px;font-size:12px}
+ .btn.grey{background:#6b7684} .btn.amber{background:#8a5906}
+ .state{font-size:11px;font-weight:800;padding:2px 8px;border-radius:9px}
+ .state.enabled{background:#cdefd6;color:#166b3d} .state.paused{background:#f3d0d5;color:#9e2d3c}
+ .res-ok{color:#166b3d}.res-error{color:#9e2d3c}.res-dry_run{color:#8a5906}.res-noop{color:#8a94a2}
+</style></head><body>
+{{ nav|safe }}
+<div class="wrap">
+  {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+  <div class="card">
+    <div class="muted"><a href="/ppc?account={{ account_filter }}">← PPC overview</a></div>
+    <h2 style="margin-top:8px;">Day-parting schedule <span class="muted">· auto on/off</span></h2>
+    <div class="muted">Tick <b>Active</b> and set the ON window (24-hour clock, {{ tz }}). The scheduler runs hourly and
+      enables the campaign inside the window, pauses it outside. Times are your local timezone. Use <b>Test</b> to fire a
+      single enable/pause now and confirm the API works before scheduling.</div>
+    <form method="GET" action="/ppc/schedule" style="margin-top:10px;">
+      <label>Account
+        <select name="account" onchange="this.form.submit()">
+          {% for a in accounts %}<option value="{{ a.account_id }}" {{ 'selected' if a.account_id==account_filter else '' }}>{{ a.account_id }}</option>{% endfor %}
+        </select>
+      </label>
+    </form>
+    {% if configured %}
+      <div class="banner live" style="margin-top:12px;">✓ Ads API configured for <b>{{ account_filter }}</b> — active campaigns are toggled <b>live</b> on Amazon.</div>
+    {% else %}
+      <div class="banner dry" style="margin-top:12px;">⚠ Ads API not configured for <b>{{ account_filter }}</b> (or PPC_DRY_RUN=1) — actions are <b>dry-run</b> (logged, nothing sent to Amazon). Set the ADS_* env vars to go live.</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <form method="POST" action="/ppc/schedule/save">
+      <input type="hidden" name="account_id" value="{{ account_filter }}">
+      <table>
+        <thead><tr><th>Campaign</th><th>Spend</th><th>Active</th><th>ON from</th><th>ON to</th><th>Now wants</th><th>Test</th></tr></thead>
+        <tbody>
+        {% for c in campaigns %}
+          {% set s = sched_by_id.get(c.campaign_id, {}) %}
+          <tr>
+            <td>{{ c.campaign_name or c.campaign_id }}<input type="hidden" name="cid" value="{{ c.campaign_id }}"><input type="hidden" name="cname_{{ c.campaign_id }}" value="{{ c.campaign_name or '' }}"></td>
+            <td>£{{ "%.2f"|format(c.spend or 0) }}</td>
+            <td><input type="checkbox" name="active_{{ c.campaign_id }}" {{ 'checked' if s.get('active') else '' }}></td>
+            <td><input type="number" min="0" max="24" name="start_{{ c.campaign_id }}" value="{{ s.get('on_start_hour', 0) }}"></td>
+            <td><input type="number" min="0" max="24" name="end_{{ c.campaign_id }}" value="{{ s.get('on_end_hour', 24) }}"></td>
+            <td>{% if s.get('active') %}<span class="state {{ desired.get(c.campaign_id,'') }}">{{ desired.get(c.campaign_id,'') }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+            <td>
+              <button class="btn sm" formaction="/ppc/schedule/test" name="test" value="{{ c.campaign_id }}:enabled">Enable now</button>
+              <button class="btn sm amber" formaction="/ppc/schedule/test" name="test" value="{{ c.campaign_id }}:paused">Pause now</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div style="margin-top:14px;"><button class="btn" type="submit">Save schedule</button>
+        <span class="muted" style="margin-left:8px;">ON window wraps midnight if "from" &gt; "to" (e.g. 22 → 6). Set from=0,to=24 for always-on.</span></div>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Recent actions</h2>
+    <div class="muted">Every enable/pause the scheduler or a Test fired. <b>dry_run</b> = logged only, nothing sent to Amazon.</div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>When (UTC)</th><th>Account</th><th>Campaign</th><th>Action</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>
+      {% for a in actions %}
+        <tr>
+          <td>{{ a.at[:16] if a.at else '' }}</td>
+          <td>{{ a.account_id }}</td>
+          <td>{{ a.campaign_name or a.campaign_id }}</td>
+          <td>{{ a.action }} → {{ a.desired_state }}</td>
+          <td class="res-{{ a.result }}">{{ a.result }}</td>
+          <td class="muted">{{ (a.detail or '')[:80] }}</td>
+        </tr>
+      {% endfor %}
+      {% if not actions %}<tr><td colspan="6" class="muted">No actions yet.</td></tr>{% endif %}
+      </tbody>
+    </table>
+  </div>
+</div></body></html>
+"""
+
+
+def _sched_context(account_filter):
+    campaigns = pl_ppc.campaign_names(account_filter) if account_filter != "all" else pl_ppc.campaign_names()
+    scheds = pl_ppc.get_schedules(account_filter if account_filter != "all" else None)
+    sched_by_id = {s["campaign_id"]: s for s in scheds}
+    import datetime as _dt
+    try:
+        from zoneinfo import ZoneInfo
+        tz = os.environ.get("ADS_TZ", "Europe/London")
+        now_hour = _dt.datetime.now(ZoneInfo(tz)).hour
+    except Exception:
+        tz = "UTC"
+        now_hour = _dt.datetime.now(_dt.timezone.utc).hour
+    desired = {cid: pl_ppc.desired_state_for_hour(s, now_hour) for cid, s in sched_by_id.items()}
+    return campaigns, sched_by_id, desired, tz
+
+
+@app.route("/ppc/schedule")
+def ppc_schedule():
+    account_filter = request.args.get("account", "all")
+    try:
+        accounts = get_accounts()
+    except Exception:
+        accounts = []
+    if account_filter == "all" and accounts:
+        account_filter = accounts[0]["account_id"]
+    campaigns, sched_by_id, desired, tz = _sched_context(account_filter)
+    return render_template_string(
+        SCHEDULE_HTML, accounts=accounts, account_filter=account_filter,
+        campaigns=campaigns, sched_by_id=sched_by_id, desired=desired, tz=tz,
+        configured=ppc_ads_api.is_configured(account_filter),
+        actions=pl_ppc.get_action_log(account_filter, limit=100))
+
+
+@app.route("/ppc/schedule/save", methods=["POST"])
+def ppc_schedule_save():
+    account_id = request.form.get("account_id")
+    cids = request.form.getlist("cid")
+    n = 0
+    for cid in cids:
+        active = 1 if request.form.get(f"active_{cid}") else 0
+        try:
+            start = int(request.form.get(f"start_{cid}", 0))
+            end = int(request.form.get(f"end_{cid}", 24))
+        except ValueError:
+            start, end = 0, 24
+        cname = request.form.get(f"cname_{cid}") or None
+        pl_ppc.upsert_schedule(account_id, cid, campaign_name=cname, active=active,
+                               on_start_hour=start, on_end_hour=end)
+        n += 1
+    flash(f"Saved schedule for {n} campaign(s). The hourly scheduler will apply active ones.")
+    return redirect(f"/ppc/schedule?account={account_id}")
+
+
+@app.route("/ppc/schedule/test", methods=["POST"])
+def ppc_schedule_test():
+    account_id = request.form.get("account_id")
+    test = request.form.get("test", "")   # "<campaign_id>:<state>"
+    cid, _, state = test.partition(":")
+    if state not in ("enabled", "paused"):
+        flash("Bad test action.")
+        return redirect(f"/ppc/schedule?account={account_id}")
+    cname = request.form.get(f"cname_{cid}") or None
+    res = ppc_ads_api.set_campaign_state(account_id, cid, state, cname)
+    flash(f"Test {state} on campaign {cid}: {res.get('result')}"
+          + (f" — {res.get('detail')}" if res.get('detail') else ""))
+    return redirect(f"/ppc/schedule?account={account_id}")
 
 
 @app.route("/ppc/term/<path:search_term>")
