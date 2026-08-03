@@ -280,18 +280,8 @@ new Chart(document.getElementById('chart'), {
     </table>
   </div>
   <div class="card">
-    <div class="title" style="font-size:15px;">Recommendation history</div>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;">
-      <tr style="text-align:left;color:#8a94a2;"><th style="padding:6px;">When (UTC)</th><th>Signal</th><th>Advised</th><th>You did</th></tr>
-      {% for r in rec_history %}
-      <tr style="border-top:1px solid #eef1f4;">
-        <td style="padding:6px;font-family:ui-monospace,Menlo,monospace;">{{ r.created_at[:16] }}</td>
-        <td>{{ r.signal_state.replace('_',' ') }}</td>
-        <td>{{ r.recommended_action }}{% if r.recommended_price %} £{{ "%.2f"|format(r.recommended_price) }}{% endif %}</td>
-        <td>{{ r.status }}{% if r.decided_price %} £{{ "%.2f"|format(r.decided_price) }}{% endif %}</td>
-      </tr>
-      {% else %}<tr><td colspan="4" style="padding:10px;color:#8a94a2;">No recommendations yet.</td></tr>{% endfor %}
-    </table>
+    <div class="title" style="font-size:15px;">Collected data (read-only from the BSR collector)</div>
+    <div class="chart-note">Last collected: <b>{{ (last_collected[:16].replace('T',' ') ~ ' UTC') if last_collected else '—' }}</b>. The ranks, units and price shown above are Module 1's raw collected data. Repricing suggestions are deliberately not surfaced here — they're designed separately.</div>
   </div>
 </body>
 </html>
@@ -313,7 +303,7 @@ def product_page(account_id, asin):
         daily = _COLLECTOR.get_daily_units(account_id, asin, days=31)
         hist_all = _COLLECTOR.get_bsr_history_import(account_id, asin)
         price_changes = _COLLECTOR.get_price_changes(account_id, asin)
-        rec_history = _COLLECTOR.get_recommendation_history(account_id, asin)
+        last_collected = latest.get("captured_at") if latest else None
         current_price = _COLLECTOR.get_current_price(
             account_id, asin, fallback=meta.get("current_price") or meta.get("floor_price"))
     else:
@@ -342,7 +332,7 @@ def product_page(account_id, asin):
         daily = get_daily_units(account_id, asin, days=31)
         hist_all = get_bsr_history_import(account_id, asin)
         price_changes = get_price_changes(account_id, asin)
-        rec_history = get_recommendation_history(account_id, asin)
+        last_collected = None
         current_price = get_current_price(
             account_id, asin, fallback=meta.get("current_price") or meta["floor_price"])
 
@@ -371,7 +361,7 @@ def product_page(account_id, asin):
         history_count=len(hist_all),
         history_from=(min(hist_all) if hist_all else ""),
         price_changes=price_changes,
-        rec_history=rec_history,
+        last_collected=last_collected,
     )
 
 

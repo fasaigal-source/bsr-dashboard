@@ -116,10 +116,11 @@ def get_rank_rows(account_id, asin, since):
 
 def get_latest_ranks(account_id, asin):
     with _conn() as c, c.cursor() as cur:
-        cur.execute("""SELECT root_rank, sub_rank FROM bsr_price_snapshots
+        cur.execute("""SELECT root_rank, sub_rank, captured_at::text AS captured_at
+                       FROM bsr_price_snapshots
                        WHERE account_id=%s AND asin=%s
                        ORDER BY captured_at DESC LIMIT 1""", (account_id, asin))
-        return cur.fetchone()  # dict or None
+        return cur.fetchone()  # dict or None (incl. captured_at = last-collected time)
 
 
 # ── daily units (velocity_daily -> {day: units}) ─────────────────────────────
