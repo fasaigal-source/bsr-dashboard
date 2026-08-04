@@ -275,8 +275,12 @@ PL_HTML = """
         <span style="font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">= Net profit (before ads)</span><span id="sumNetBefore" style="text-align:right;font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">£0.00</span>
         <span>− Ad spend</span><span id="sumAdspend" style="text-align:right;">−£0.00</span>
         <span style="font-weight:600;">= Net profit (after ads)</span><span id="sumNetAfterEcho" style="text-align:right;font-weight:600;">£0.00</span>
+        <span>− Overheads (period) <a href="/pl/expenses" style="font-weight:400;">edit</a></span><span id="sumOverheads" style="text-align:right;">−£0.00</span>
+        <span style="font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">= Net profit after overheads</span><span id="sumNetAfterOh" style="text-align:right;font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">£0.00</span>
       </div>
+      <div class="hint" style="margin-top:8px;">Overheads are the <b>whole-business</b> total for {{ range_start }} → {{ range_end }} (monthly items pro-rated by days), from the <a href="/pl/expenses">Expenses</a> page — kept out of per-order COGS and never split per product. They don't scale with the row filters above, so <b>“after overheads” is the true bottom line only at the unfiltered view</b>.</div>
     </details>
+    <script>window.PL_OVERHEADS = {{ '%.4f'|format(overheads_period or 0) }};</script>
     <div id="plSummaryProvisional" class="hint" style="margin-top:10px;color:#8a5906;display:none;"></div>
     {% if ad_coverage_warning %}
     <div class="hint" style="margin-top:6px;color:#8a5906;">⚠ Net profit (after ads) is incomplete: {% if not ad_coverage_warning.has_data %}no ad spend uploaded for this range{% else %}ad data only covers {{ ad_coverage_warning.cov_min }} to {{ ad_coverage_warning.cov_max }}, short of the selected range{% endif %} — <a href="/pl/ads">upload a report</a>.</div>
@@ -867,6 +871,11 @@ PL_HTML = """
       plSetCost("sumRef", ref); plSetCost("sumOther", oth); plSetCost("sumPromo", promo);
       plSetCost("sumCogs", cogs); plSetCost("sumPostage", post); plSetCost("sumAdspend", ad);
       plSetNet("sumNetBefore", netB); plSetNet("sumNetAfter", netA); plSetNet("sumNetAfterEcho", netA);
+      // Overheads: a business-wide, period figure (not row-scaled) — subtract from
+      // net-after-ads for the true bottom line.
+      var oh = (window.PL_OVERHEADS || 0);
+      plSetCost("sumOverheads", oh);
+      plSetNet("sumNetAfterOh", netA - oh);
       plS("sumOrders", orders); plS("sumUnits", units);
       plS("sumMargin", g ? (100*netA/g).toFixed(1) + "%" : "—");
       plS("sumAsp", units ? "£" + (g/units).toFixed(2) : "—");
@@ -1092,6 +1101,14 @@ def pl_page():
     postage_missing_total = sum(r.get("postage_missing_count") or 0 for r in canonical_rows) + postage_estimated_total + postage_provisional_total
     unpriced_total = sum(r.get("unpriced_count") or 0 for r in canonical_rows)
     range_start, range_end = pl_db.resolve_pl_date_range(account_filter, start_date=start_date)
+    # Business overheads (Expenses page) pro-rated to the viewed window — a
+    # business-wide bottom-line figure only, NEVER allocated to per-product rows.
+    try:
+        import pl_expenses
+        overheads_period = pl_expenses.compute_overheads(
+            account_filter, range_start, range_end).get("total", 0.0)
+    except Exception:
+        overheads_period = 0.0
     # module2_range_summary (File H): last SP-API sync time, so the summary can
     # state "settled orders, as of last sync ..." -- Module 2 is manual-sync, so
     # the data window ends at the newest SETTLED order, not necessarily today.
@@ -1219,13 +1236,21 @@ def pl_page():
     postage_week_count = pl_postage.count_missing_postage_last_n_days(
         account_filter, days=10, min_age_days=3)
 
-    # Monthly overheads (module2_cogs_integration): a FIXED cost, never
-    # allocated into per-order COGS -- summed across every real account when
-    # "all accounts" is selected, otherwise just that one account's figure.
-    if account_filter == "all":
-        overhead_monthly = sum(pl_cogs.get_overheads(a["account_id"]) for a in accounts)
-    else:
-        overhead_monthly = pl_cogs.get_overheads(account_filter)
+    # Monthly overheads: now a MONTHLY RUN-RATE derived from the Expenses page
+    # (pl_expenses) — the single source of truth. The old flat pl_cogs.get_overheads
+    # field is retired so overheads can't be entered in two places and double-count.
+    # Run-rate = sum of currently-active recurring monthly overheads for the account
+    # (+ 'shared'); the range summary shows the precise day-pro-rated figure incl. one-offs.
+    try:
+        import pl_expenses as _plx
+        import datetime as _pxdt
+        _today = _pxdt.date.today().isoformat()
+        _oh_rows = _plx.list_overheads(None if account_filter == "all" else account_filter)
+        overhead_monthly = round(sum(
+            (r["amount"] or 0) for r in _oh_rows
+            if r["kind"] == "recurring" and (not r["end_date"] or str(r["end_date"])[:10] >= _today)), 2)
+    except Exception:
+        overhead_monthly = 0.0
 
     if account_filter == "all":
         period_rows = pl_db.get_combined_period_rollup(period, vat_treatment=vat_treatment,
@@ -1298,6 +1323,7 @@ def pl_page():
         postage_manual_total=postage_manual_total, postage_missing_total=postage_missing_total,
         postage_week_count=postage_week_count,
         unpriced_total=unpriced_total, overhead_monthly=overhead_monthly,
+        overheads_period=overheads_period,
         range_key=range_key, range_start=range_start, range_end=range_end,
         last_synced=last_synced, last_synced_iso=last_synced_iso,
         ad_orphans=ad_orphans, ad_coverage_warning=ad_coverage_warning,
@@ -1371,18 +1397,11 @@ COGS_HTML = """
   </div>
 
   <div class="card">
-    <div class="title">Monthly overheads</div>
-    <div class="subtitle">Warehouse + labour + packaging + utilities, entered ex-VAT. A FIXED cost —
-      never allocated into per-order COGS — subtracted as a single line at the monthly P&amp;L view.</div>
-    <form method="POST" action="/pl/cogs/overheads" class="row-inline">
-      <label>Account</label>
-      <select name="account_id">{% for a in accounts %}
-        <option value="{{ a.account_id }}" {{ "selected" if a.account_id==default_account else "" }}>{{ a.account_id }}</option>
-      {% endfor %}</select>
-      <label>Monthly amount (£, ex-VAT)</label>
-      <input type="number" step="0.01" name="amount" value="{{ current_overhead }}">
-      <button class="btn" type="submit">Save</button>
-    </form>
+    <div class="title">Monthly overheads → moved to Expenses</div>
+    <div class="subtitle">Overheads now live on the dedicated <a href="/pl/expenses"><b>Expenses</b></a> page —
+      one source of truth (recurring monthly + one-off, with start/end dates, per account), pro-rated to the
+      period you're viewing and subtracted at the P&amp;L summary. The old single flat field here is retired so
+      the same overhead can't be entered twice and double-count. <a href="/pl/expenses">Open Expenses →</a></div>
   </div>
 
   <datalist id="canonicalOptions">
@@ -1832,16 +1851,10 @@ def pl_cogs_define_family():
 
 @app.route("/pl/cogs/overheads", methods=["POST"])
 def pl_cogs_set_overheads():
-    account_id = request.form.get("account_id")
-    amount_raw = (request.form.get("amount") or "").strip()
-    try:
-        amount = float(amount_raw) if amount_raw else 0.0
-    except ValueError:
-        flash(f"'{amount_raw}' is not a valid number.")
-        return redirect("/pl/cogs")
-    pl_cogs.set_overheads(account_id, amount)
-    flash(f"Saved monthly overheads of £{amount:.2f} for {account_id}.")
-    return redirect(f"/pl/cogs?account={account_id}")
+    # Retired: overheads now live on the Expenses page (single source of truth).
+    # Kept as a redirect so any stale bookmark/form can't write the old flat field.
+    flash("Monthly overheads moved to the Expenses page — add them there instead.")
+    return redirect("/pl/expenses")
 
 
 @app.route("/pl/inline-cogs", methods=["POST"])

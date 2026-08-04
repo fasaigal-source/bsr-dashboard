@@ -21,6 +21,7 @@
 !/dashboard_module1.py
 !/dashboard_module2.py
 !/dashboard_module3.py
+!/dashboard_expenses.py
 
 # data layer + read-only collector mapping
 !/db.py
@@ -39,6 +40,7 @@
 !/pl_amazon.py
 !/pl_tracker.py
 !/pl_ppc.py
+!/pl_expenses.py
 !/ppc_ads_api.py
 !/ppc_scheduler.py
 

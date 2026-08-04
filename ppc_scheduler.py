@@ -43,26 +43,27 @@ def _local_hour():
         return datetime.now(timezone.utc).hour, "UTC"
 
 
-def reconcile(account_id=None, force=False, now_hour=None, now_dt=None):
+def reconcile(account_id=None, force=False, now_slot=None, now_dt=None):
     """Bring every active OR snoozed campaign to the state it should be in right now.
-    Returns (checked, changed)."""
+    now_slot = the current 15-min slot (0..95) in the scheduling tz. Returns
+    (checked, changed)."""
     import pl_ppc
     import ppc_ads_api
     if now_dt is None:
         now_dt = datetime.now(timezone.utc)
-    if now_hour is None:
-        now_hour, tzname = _local_hour()
-    else:
-        tzname = "override"
+    if now_slot is None:
+        now_slot = pl_ppc.current_slot()
+    tzname = os.environ.get("ADS_TZ", "Europe/London")
+    hh, mm = (now_slot * pl_ppc.SLOT_MINUTES) // 60, (now_slot * pl_ppc.SLOT_MINUTES) % 60
     # every schedule row; act on those that are active OR currently/recently snoozed.
     scheds = pl_ppc.get_schedules(account_id, active_only=False)
     todo = [s for s in scheds if s.get("active") or s.get("paused_until")]
-    log.info("reconcile: hour=%02d:00 %s — %d campaign(s) to check", now_hour, tzname, len(todo))
+    log.info("reconcile: slot=%02d:%02d %s — %d campaign(s) to check", hh, mm, tzname, len(todo))
     checked = changed = 0
     for s in todo:
         checked += 1
         snoozed = pl_ppc.is_snoozed(s, now_dt)
-        desired = pl_ppc.desired_state_now(s, now_hour, now_dt)
+        desired = pl_ppc.desired_state_now(s, now_slot, now_dt)
         # snooze just expired (paused_until set but no longer in the future) → resume + clear it
         if s.get("paused_until") and not snoozed:
             pl_ppc.clear_snooze(s["account_id"], s["campaign_id"])

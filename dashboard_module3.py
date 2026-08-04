@@ -255,8 +255,9 @@ def ppc_upload():
     try:
         s = pl_ppc.import_search_term_csv(account_id, tmp)
         rc = s.get("recs") or {}
-        rec_msg = (f" Worklist: {rc.get('pause',0)} pause, {rc.get('manual_review',0)} review, "
-                   f"{rc.get('harvest',0)} harvest, {rc.get('bid_down',0)} bid-down.") if rc else ""
+        rec_msg = (f" Worklist: {rc.get('pause',0)} pause, {rc.get('negative',0)} negative, "
+                   f"{rc.get('manual_review',0)} review, {rc.get('harvest',0)} harvest, "
+                   f"{rc.get('bid_down',0)} bid-down.") if rc else ""
         flash(f"Imported {s['rows']} row(s) for {account_id} "
               f"({s['date_min']} → {s['date_max']}, {len(s['hours'])} hours)."
               + (f" {s['skipped']} row(s) skipped." if s.get("skipped") else "")
@@ -321,7 +322,11 @@ DETAIL_HTML = """
 
   {% if kind == 'campaign' and pause_account %}
   <div class="card">
-    <h2 style="font-size:15px;">Quick pause <span class="muted">— pause this whole campaign now; it auto-resumes</span></h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <h2 style="font-size:15px;margin:0;">Quick pause <span class="muted">— ad-hoc; auto-resumes</span></h2>
+      <a class="btn" href="/ppc/schedule/edit/{{ campaign_id }}?account={{ pause_account }}">✎ Edit day-parting schedule</a>
+    </div>
+    <div class="muted" style="margin-top:6px;">Set automatic ON/OFF windows against this campaign's own hourly waste chart in the schedule editor. The buttons below are just an ad-hoc manual pause.</div>
     {% if snoozed_until %}<div class="tag waste" style="display:inline-block;margin:8px 0;">⏸ PAUSED until {{ snoozed_until[11:16] }} UTC ({{ snoozed_until[:10] }})</div>{% endif %}
     <form method="POST" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;">
       <input type="hidden" name="account_id" value="{{ pause_account }}">
@@ -478,10 +483,10 @@ SCHEDULE_HTML = """
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
   <div class="card">
     <div class="muted"><a href="/ppc?account={{ account_filter }}">← PPC overview</a></div>
-    <h2 style="margin-top:8px;">Day-parting schedule <span class="muted">· auto on/off</span></h2>
-    <div class="muted">Tick <b>Active</b> and set the ON window (24-hour clock, {{ tz }}). The scheduler runs hourly and
-      enables the campaign inside the window, pauses it outside. Times are your local timezone. Use <b>Test</b> to fire a
-      single enable/pause now and confirm the API works before scheduling.</div>
+    <h2 style="margin-top:8px;">Day-parting schedule <span class="muted">· automatic on/off</span></h2>
+    <div class="muted">Set each campaign's ON/OFF windows in its <b>schedule editor</b> (down to 15-minute boundaries, {{ tz }}).
+      The reconciler runs every ~5&nbsp;min and enables the campaign inside its ON windows, pauses it outside — no manual clicking.
+      The WASTING/CONVERTS evidence is <b>hourly</b> (that's the finest Amazon reports); you paint sub-hour boundaries off it.</div>
     <form method="GET" action="/ppc/schedule" style="margin-top:10px;">
       <label>Account
         <select name="account" onchange="this.form.submit()">
@@ -497,37 +502,58 @@ SCHEDULE_HTML = """
   </div>
 
   <div class="card">
-    <form method="POST" action="/ppc/schedule/save">
-      <input type="hidden" name="account_id" value="{{ account_filter }}">
-      <table>
-        <thead><tr><th>Campaign</th><th>Spend</th><th>Active</th><th>ON from</th><th>ON to</th><th>Now wants</th><th>Temp pause</th><th>Test</th></tr></thead>
-        <tbody>
-        {% for c in campaigns %}
-          {% set s = sched_by_id.get(c.campaign_id, {}) %}
-          <tr>
-            <td>{{ c.campaign_name or c.campaign_id }}<input type="hidden" name="cid" value="{{ c.campaign_id }}"><input type="hidden" name="cname_{{ c.campaign_id }}" value="{{ c.campaign_name or '' }}"></td>
-            <td>£{{ "%.2f"|format(c.spend or 0) }}</td>
-            <td><input type="checkbox" name="active_{{ c.campaign_id }}" {{ 'checked' if s.get('active') else '' }}></td>
-            <td><input type="number" min="0" max="24" name="start_{{ c.campaign_id }}" value="{{ s.get('on_start_hour', 0) }}"></td>
-            <td><input type="number" min="0" max="24" name="end_{{ c.campaign_id }}" value="{{ s.get('on_end_hour', 24) }}"></td>
-            <td>{% if snoozed.get(c.campaign_id) %}<span class="state paused">paused</span>{% elif s.get('active') %}<span class="state {{ desired.get(c.campaign_id,'') }}">{{ desired.get(c.campaign_id,'') }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-            <td>
-              {% if snoozed.get(c.campaign_id) %}<div class="muted" style="margin-bottom:4px;">⏸ until {{ snoozed[c.campaign_id][11:16] }}Z</div>{% endif %}
+    <table>
+      <thead><tr><th>Campaign</th><th>Spend</th><th>Active</th><th>ON windows</th><th>Now wants</th><th>Schedule</th></tr></thead>
+      <tbody>
+      {% for c in campaigns %}
+        {% set s = sched_by_id.get(c.campaign_id, {}) %}
+        {% set w = windows.get(c.campaign_id) %}
+        <tr>
+          <td>{{ c.campaign_name or c.campaign_id }}</td>
+          <td>£{{ "%.2f"|format(c.spend or 0) }}</td>
+          <td>{% if s.get('active') %}<span class="state enabled">ON</span>{% else %}<span class="muted">off</span>{% endif %}</td>
+          <td>
+            {% if not s.get('active') %}<span class="muted">not scheduled</span>
+            {% elif w and w|length %}{% for win in w %}<span class="pill" style="background:#eef4f4;color:#0e5c5b;margin-right:4px;">{{ win.start }}–{{ win.end }}</span>{% endfor %}
+            {% else %}<span class="muted">always off</span>{% endif %}
+          </td>
+          <td>{% if snoozed.get(c.campaign_id) %}<span class="state paused">paused (ad-hoc)</span>{% elif s.get('active') %}<span class="state {{ desired.get(c.campaign_id,'') }}">{{ desired.get(c.campaign_id,'') }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><a class="btn sm" href="/ppc/schedule/edit/{{ c.campaign_id }}?account={{ account_filter }}">✎ Edit schedule</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted" style="margin-top:10px;">“Now wants” is what the reconciler would set this minute (slot {{ tz }}). Open a campaign's editor to paint its ON/OFF windows on the hourly chart.</div>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;">Ad-hoc pause <span class="muted">— a separate manual tool, not the schedule</span></h2>
+    <div class="muted">One-off “pause this campaign now for X minutes”, then auto-resume. Independent of the day-parting schedule above — use it for a quick manual intervention.</div>
+    <table style="margin-top:8px;">
+      <thead><tr><th>Campaign</th><th>Status</th><th>Pause now for…</th><th>Test toggle</th></tr></thead>
+      <tbody>
+      {% for c in campaigns %}
+        <tr>
+          <td>{{ c.campaign_name or c.campaign_id }}</td>
+          <td>{% if snoozed.get(c.campaign_id) %}<span class="state paused">⏸ until {{ snoozed[c.campaign_id][11:16] }}Z</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>
+            <form method="POST" style="display:inline;"><input type="hidden" name="account_id" value="{{ account_filter }}">
               <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ c.campaign_id }}:15">15m</button>
               <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ c.campaign_id }}:30">30m</button>
+              <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ c.campaign_id }}:60">60m</button>
               <button class="btn sm grey" formaction="/ppc/resume" name="resume" value="{{ c.campaign_id }}">Resume</button>
-            </td>
-            <td>
+            </form>
+          </td>
+          <td>
+            <form method="POST" style="display:inline;"><input type="hidden" name="account_id" value="{{ account_filter }}">
               <button class="btn sm" formaction="/ppc/schedule/test" name="test" value="{{ c.campaign_id }}:enabled">Enable now</button>
               <button class="btn sm amber" formaction="/ppc/schedule/test" name="test" value="{{ c.campaign_id }}:paused">Pause now</button>
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      <div style="margin-top:14px;"><button class="btn" type="submit">Save schedule</button>
-        <span class="muted" style="margin-left:8px;">ON window wraps midnight if "from" &gt; "to" (e.g. 22 → 6). Set from=0,to=24 for always-on.</span></div>
-    </form>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -554,21 +580,24 @@ SCHEDULE_HTML = """
 """
 
 
+def _windows_for(s):
+    """Readable ON windows for a schedule row — from its 15-min slot_mask, or derived
+    from the legacy whole-hour window if it has no mask yet."""
+    sm = s.get("slot_mask") or pl_ppc.window_to_slot_mask(
+        s.get("on_start_hour", 0), s.get("on_end_hour", 24))
+    return pl_ppc.slot_mask_to_windows(sm)
+
+
 def _sched_context(account_filter):
     campaigns = pl_ppc.campaign_names(account_filter) if account_filter != "all" else pl_ppc.campaign_names()
     scheds = pl_ppc.get_schedules(account_filter if account_filter != "all" else None)
     sched_by_id = {s["campaign_id"]: s for s in scheds}
-    import datetime as _dt
-    try:
-        from zoneinfo import ZoneInfo
-        tz = os.environ.get("ADS_TZ", "Europe/London")
-        now_hour = _dt.datetime.now(ZoneInfo(tz)).hour
-    except Exception:
-        tz = "UTC"
-        now_hour = _dt.datetime.now(_dt.timezone.utc).hour
-    desired = {cid: pl_ppc.desired_state_for_hour(s, now_hour) for cid, s in sched_by_id.items()}
+    tz = os.environ.get("ADS_TZ", "Europe/London")
+    now_slot = pl_ppc.current_slot(tz)
+    desired = {cid: pl_ppc.desired_state_for_slot(s, now_slot) for cid, s in sched_by_id.items()}
+    windows = {cid: _windows_for(s) for cid, s in sched_by_id.items()}
     snoozed = {cid: s.get("paused_until") for cid, s in sched_by_id.items() if pl_ppc.is_snoozed(s)}
-    return campaigns, sched_by_id, desired, tz, snoozed
+    return campaigns, sched_by_id, desired, tz, snoozed, windows
 
 
 @app.route("/ppc/schedule")
@@ -580,12 +609,261 @@ def ppc_schedule():
         accounts = []
     if account_filter == "all" and accounts:
         account_filter = accounts[0]["account_id"]
-    campaigns, sched_by_id, desired, tz, snoozed = _sched_context(account_filter)
+    campaigns, sched_by_id, desired, tz, snoozed, windows = _sched_context(account_filter)
     return render_template_string(
         SCHEDULE_HTML, accounts=accounts, account_filter=account_filter,
         campaigns=campaigns, sched_by_id=sched_by_id, desired=desired, tz=tz,
-        snoozed=snoozed, configured=ppc_ads_api.is_configured(account_filter),
+        snoozed=snoozed, windows=windows, configured=ppc_ads_api.is_configured(account_filter),
         actions=pl_ppc.get_action_log(account_filter, limit=100))
+
+
+EDITOR_HTML = """
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schedule — {{ campaign_name }} — PPC</title>
+<style>
+ *{box-sizing:border-box}
+ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef1f4;color:#12161c;margin:0}
+ .wrap{max-width:1460px;margin:22px auto;padding:0 20px} a{color:#0e5c5b}
+ .card{background:#fff;border-radius:12px;padding:20px 22px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:18px}
+ h2{margin:0 0 4px;font-size:17px} .muted{color:#8a94a2;font-size:13px}
+ .flash{background:#e7f6ee;color:#166b3d;padding:10px 14px;border-radius:8px;margin-bottom:14px;font-weight:600}
+ .banner{padding:10px 14px;border-radius:10px;font-size:13px;margin:10px 0}
+ .banner.live{background:#e7f6ee;color:#166b3d} .banner.dry{background:#fbf1dd;color:#8a5906}
+ .btn{background:#0e5c5b;color:#eafcfb;border:none;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:13px;text-decoration:none;display:inline-block}
+ .btn.sm{padding:5px 10px;font-size:12px} .btn.grey{background:#6b7684}
+ .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+ .tl{user-select:none;overflow-x:auto;padding-bottom:6px}
+ .bars,.slots,.hourlabels{display:flex}
+ .bar{height:70px;display:flex;align-items:flex-end;border-left:1px solid #eef1f4;position:relative}
+ .bar .fill{width:100%;border-radius:2px 2px 0 0}
+ .cell{height:26px;border-left:1px solid #fff;cursor:pointer}
+ .cell.on{background:#0e5c5b}.cell.off{background:#dfe4e9}
+ .cell.now{outline:2px solid #f0a500;outline-offset:-2px;z-index:2}
+ .hourlabels div{font-size:10px;color:#8a94a2;text-align:left;border-left:1px solid #eef1f4;padding-left:2px}
+ .legend{display:flex;gap:14px;font-size:12px;color:#5a6472;margin-top:8px;flex-wrap:wrap}
+ .sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:4px}
+ input[type=radio]{vertical-align:-1px}
+ table.brk{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+ table.brk th,table.brk td{padding:7px 9px;text-align:right;border-top:1px solid #eef1f4;white-space:nowrap}
+ table.brk th:first-child,table.brk td:first-child{text-align:left}
+ table.brk th{color:#8a94a2;font-size:11px;text-transform:uppercase}
+ tr.waste{background:#fdecee} tr.win{background:#eefaf0}
+ .tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:9px}
+ .tag.waste{background:#f9d6da;color:#9e2d3c} .tag.win{background:#cdefd6;color:#166b3d}
+ .sch-on{color:#166b3d;font-weight:700}.sch-off{color:#9e2d3c;font-weight:700}.sch-part{color:#8a5906;font-weight:700}
+</style></head><body>
+{{ nav|safe }}
+<div class="wrap">
+  {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+  <div class="card">
+    <div class="muted"><a href="/ppc/schedule?account={{ account_id }}">← Day-parting schedule</a></div>
+    <h2 style="margin-top:8px;">Schedule · {{ campaign_name }}</h2>
+    <div class="muted">Paint the ON (green) / OFF (grey) windows below. Boundaries snap to 15 or 30 minutes; the reconciler
+      runs every ~5&nbsp;min and enforces them ({{ tz }}). The bars are <b>hourly</b> spend evidence
+      (<span style="color:#166b3d;">converts</span> / <span style="color:#9e2d3c;">wasting</span>) — Amazon has no sub-hour data, so use them as a guide.</div>
+    {% if configured %}<div class="banner live">✓ Live — active schedules toggle campaigns on Amazon.</div>
+    {% else %}<div class="banner dry">⚠ Dry-run — {{ 'PPC_DRY_RUN=1' if dry_reason=='killswitch' else 'no ADS_* creds' }}; the schedule is saved and logged, nothing is sent to Amazon.</div>{% endif %}
+
+    <form method="POST" action="/ppc/schedule/edit/save" id="schedForm">
+      <input type="hidden" name="account_id" value="{{ account_id }}">
+      <input type="hidden" name="campaign_id" value="{{ campaign_id }}">
+      <input type="hidden" name="campaign_name" value="{{ campaign_name }}">
+      <input type="hidden" name="slot_mask" id="maskInput" value="{{ mask }}">
+      <div class="toolbar">
+        <label><input type="checkbox" name="active" id="activeCb" {{ 'checked' if active else '' }}> <b>Active</b> — reconciler manages this campaign</label>
+        <span class="muted">| Snap:</span>
+        <label><input type="radio" name="snap" value="30" checked onclick="SNAP=30"> 30 min</label>
+        <label><input type="radio" name="snap" value="15" onclick="SNAP=15"> 15 min</label>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="btn sm grey" onclick="preset('on')">All ON</button>
+        <button type="button" class="btn sm grey" onclick="preset('off')">All OFF</button>
+        <button type="button" class="btn sm grey" onclick="preset('invert')">Invert</button>
+        <button type="button" class="btn sm grey" onclick="preset('office')">Office 08:00–20:00</button>
+        <button type="button" class="btn sm grey" onclick="preset('converts')">ON where it converts</button>
+      </div>
+
+      <div class="tl">
+        <div class="bars" id="bars"></div>
+        <div class="slots" id="slots"></div>
+        <div class="hourlabels" id="hourlabels"></div>
+      </div>
+      <div class="legend">
+        <span><span class="sw" style="background:#0e5c5b;"></span>ON</span>
+        <span><span class="sw" style="background:#dfe4e9;"></span>OFF</span>
+        <span><span class="sw" style="background:#7cc48a;"></span>hour converts</span>
+        <span><span class="sw" style="background:#e2828d;"></span>hour wasting</span>
+        <span><span class="sw" style="outline:2px solid #f0a500;"></span>now</span>
+      </div>
+      <div class="muted" id="summary" style="margin-top:10px;"></div>
+      <div style="margin-top:14px;"><button class="btn" type="submit">Save schedule</button>
+        <span class="muted" style="margin-left:8px;">Tip: click a bar to toggle that whole hour; drag across cells to paint.</span></div>
+    </form>
+    <form method="POST" style="margin-top:12px;border-top:1px solid #eef1f4;padding-top:12px;">
+      <input type="hidden" name="account_id" value="{{ account_id }}">
+      <input type="hidden" name="campaign_name" value="{{ campaign_name }}">
+      <input type="hidden" name="next" value="/ppc/schedule/edit/{{ campaign_id }}?account={{ account_id }}">
+      <span class="muted"><b>Ad-hoc pause</b> — separate manual tool, not the schedule:</span>
+      <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ campaign_id }}:15">15m</button>
+      <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ campaign_id }}:30">30m</button>
+      <button class="btn sm amber" formaction="/ppc/pause" name="snooze" value="{{ campaign_id }}:60">60m</button>
+      <button class="btn sm grey" formaction="/ppc/resume" name="resume" value="{{ campaign_id }}">Resume</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:15px;">This campaign's hour-by-hour breakdown
+      <span class="muted">— <b>{{ campaign_name }}</b>'s own hourly data, not the account blend</span></h2>
+    <div class="muted"><span class="tag waste">WASTING</span> = spend but zero sales · <span class="tag win">CONVERTS</span> = has sales.
+      Summed across all days in the report. The <b>Scheduled</b> column reflects the windows you paint above (updates live).</div>
+    <table class="brk">
+      <thead><tr><th>Hour</th><th>Impr</th><th>Clicks</th><th>Spend</th><th>Orders</th><th>Sales</th><th>ROAS</th><th>ACOS</th><th>State</th><th>Scheduled</th></tr></thead>
+      <tbody>
+      {% for h in hours %}
+        <tr class="{{ 'waste' if (h.spend and not h.sales) else ('win' if h.sales else '') }}">
+          <td>{{ '%02d:00'|format(h.hour) }}</td>
+          <td>{{ h.impressions or 0 }}</td>
+          <td>{{ h.clicks or 0 }}</td>
+          <td>£{{ '%.2f'|format(h.spend or 0) }}</td>
+          <td>{{ h.orders or 0 }}</td>
+          <td>£{{ '%.2f'|format(h.sales or 0) }}</td>
+          <td>{{ '%.2f×'|format((h.sales or 0)/(h.spend or 1)) if h.spend else '—' }}</td>
+          <td>{{ '%.0f%%'|format(100*(h.spend or 0)/(h.sales or 1)) if h.sales else '—' }}</td>
+          <td>{% if h.spend and not h.sales %}<span class="tag waste">WASTING</span>{% elif h.sales %}<span class="tag win">CONVERTS</span>{% endif %}</td>
+          <td class="sched-cell" data-hour="{{ h.hour }}">—</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+<script>
+  var HOURS = {{ hours_json|safe }};   // [{hour,spend,sales,orders}]
+  var MASK  = "{{ mask }}".split("").map(function(x){return x==="1"?1:0;});
+  var NOWSLOT = {{ now_slot }};
+  var SNAP = 30;
+  var CW = 14;   // px per 15-min cell
+  var maxSpend = Math.max.apply(null, HOURS.map(function(h){return h.spend||0;}).concat([0.01]));
+
+  function hhmm(idx){var m=(idx%96)*15;return ("0"+Math.floor(m/60)).slice(-2)+":"+("0"+(m%60)).slice(-2);}
+  function hourState(h){ if((h.spend||0)>0 && !(h.sales>0)) return "waste"; if(h.sales>0) return "conv"; return "idle"; }
+
+  function buildBars(){
+    var bars=document.getElementById("bars"); bars.innerHTML="";
+    HOURS.forEach(function(h){
+      var d=document.createElement("div"); d.className="bar"; d.style.width=(CW*4)+"px";
+      var col = hourState(h)==="waste"?"#e2828d":(hourState(h)==="conv"?"#7cc48a":"#cfd6dc");
+      var pct = Math.round(100*(h.spend||0)/maxSpend);
+      d.innerHTML='<div class="fill" style="height:'+Math.max(3,pct)+'%;background:'+col+';"></div>';
+      d.title="Hour "+("0"+h.hour).slice(-2)+":00 — £"+(h.spend||0).toFixed(2)+" spend, £"+(h.sales||0).toFixed(2)+" sales, "+(h.orders||0)+" orders";
+      d.onclick=function(){ toggleHour(h.hour); };
+      bars.appendChild(d);
+    });
+  }
+  function buildSlots(){
+    var s=document.getElementById("slots"); s.innerHTML="";
+    for(var i=0;i<96;i++){
+      var c=document.createElement("div");
+      c.className="cell "+(MASK[i]?"on":"off")+(i===NOWSLOT?" now":"");
+      c.style.width=CW+"px"; c.dataset.i=i;
+      c.addEventListener("mousedown",onDown); c.addEventListener("mouseenter",onEnter);
+      s.appendChild(c);
+    }
+    var hl=document.getElementById("hourlabels"); hl.innerHTML="";
+    for(var hh=0;hh<24;hh++){var d=document.createElement("div");d.style.width=(CW*4)+"px";d.textContent=("0"+hh).slice(-2);hl.appendChild(d);}
+  }
+  function paint(i,val){
+    MASK[i]=val;
+    if(SNAP===30){ var j = i%2===0 ? i+1 : i-1; if(j>=0&&j<96) MASK[j]=val; }
+    refresh();
+  }
+  var painting=false, paintVal=1;
+  function onDown(e){ e.preventDefault(); painting=true; var i=+this.dataset.i; paintVal=MASK[i]?0:1; paint(i,paintVal); }
+  function onEnter(e){ if(painting){ paint(+this.dataset.i, paintVal); } }
+  document.addEventListener("mouseup",function(){painting=false;});
+  function toggleHour(h){ var base=h*4; var anyOn=false; for(var k=0;k<4;k++) if(MASK[base+k]) anyOn=true; var v=anyOn?0:1; for(var k=0;k<4;k++) MASK[base+k]=v; refresh(); }
+
+  function preset(kind){
+    for(var i=0;i<96;i++){
+      if(kind==="on")MASK[i]=1;
+      else if(kind==="off")MASK[i]=0;
+      else if(kind==="invert")MASK[i]=MASK[i]?0:1;
+      else if(kind==="office")MASK[i]=(Math.floor(i/4)>=8 && Math.floor(i/4)<20)?1:0;
+      else if(kind==="converts"){var h=HOURS[Math.floor(i/4)]||{}; if(h.sales>0)MASK[i]=1; else if((h.spend||0)>0)MASK[i]=0;}
+    }
+    refresh();
+  }
+  function windows(){
+    var out=[],i=0;
+    while(i<96){ if(MASK[i]){var j=i;while(j<96&&MASK[j])j++;out.push([i,j]);i=j;} else i++; }
+    if(out.length>=2 && out[0][0]===0 && out[out.length-1][1]===96){var f=out.shift();out[out.length-1][1]=96+f[1];}
+    return out.map(function(w){return hhmm(w[0])+"–"+hhmm(w[1]);});
+  }
+  function refresh(){
+    var cells=document.getElementById("slots").children;
+    for(var i=0;i<96;i++){ cells[i].className="cell "+(MASK[i]?"on":"off")+(i===NOWSLOT?" now":""); }
+    document.getElementById("maskInput").value=MASK.join("");
+    var w=windows();
+    document.getElementById("summary").innerHTML = w.length? ("<b>ON windows:</b> "+w.join(",  ")) : "<b>All OFF</b> — this campaign would stay paused all day.";
+    // reflect painted windows into the breakdown table's Scheduled column
+    var sc=document.querySelectorAll(".sched-cell");
+    for(var k=0;k<sc.length;k++){ var h=+sc[k].dataset.hour, on=0;
+      for(var q=0;q<4;q++) on+=MASK[h*4+q];
+      if(on===4){sc[k].textContent="ON";sc[k].className="sched-cell sch-on";}
+      else if(on===0){sc[k].textContent="OFF";sc[k].className="sched-cell sch-off";}
+      else{sc[k].textContent="part";sc[k].className="sched-cell sch-part";}
+    }
+  }
+  buildBars(); buildSlots(); refresh();
+</script>
+</body></html>
+"""
+
+
+@app.route("/ppc/schedule/edit/<campaign_id>")
+def ppc_schedule_edit(campaign_id):
+    account_filter = request.args.get("account", "all")
+    account = account_filter if account_filter != "all" else pl_ppc.account_for_campaign(campaign_id)
+    sched = pl_ppc.get_schedule(account, campaign_id) if account else None
+    mask = (sched or {}).get("slot_mask")
+    if not (mask and len(mask) == 96):
+        if sched:
+            mask = pl_ppc.window_to_slot_mask(sched.get("on_start_hour", 0), sched.get("on_end_hour", 24))
+        else:
+            mask = "1" * 96   # new schedule defaults to always-on until you paint it
+    hours = _hours_full(pl_ppc.by_hour(account or account_filter, campaign_id=campaign_id))
+    totals = pl_ppc.entity_totals(account or account_filter, campaign_id=campaign_id)
+    cname = totals.get("campaign_name") or campaign_id
+    return render_template_string(
+        EDITOR_HTML, account_id=account or account_filter, campaign_id=campaign_id,
+        campaign_name=cname, mask=mask, active=bool(sched and sched.get("active")),
+        hours=hours,
+        hours_json=json.dumps([{"hour": h["hour"], "spend": h["spend"], "sales": h["sales"],
+                                "orders": h["orders"]} for h in hours]),
+        now_slot=pl_ppc.current_slot(os.environ.get("ADS_TZ", "Europe/London")),
+        tz=os.environ.get("ADS_TZ", "Europe/London"),
+        configured=ppc_ads_api.is_configured(account or account_filter),
+        dry_reason="killswitch" if os.environ.get("PPC_DRY_RUN") == "1" else "nocreds")
+
+
+@app.route("/ppc/schedule/edit/save", methods=["POST"])
+def ppc_schedule_edit_save():
+    account_id = request.form.get("account_id")
+    cid = request.form.get("campaign_id")
+    cname = request.form.get("campaign_name") or None
+    active = 1 if request.form.get("active") else 0
+    mask = (request.form.get("slot_mask") or "").strip()
+    nxt = f"/ppc/schedule/edit/{cid}?account={account_id}"
+    if len(mask) != 96 or set(mask) - {"0", "1"}:
+        flash("Schedule not saved — the timeline data was invalid.")
+        return redirect(nxt)
+    pl_ppc.upsert_schedule(account_id, cid, campaign_name=cname, active=active, slot_mask=mask)
+    wins = pl_ppc.slot_mask_to_windows(mask) or []
+    summary = ", ".join(f"{w['start']}–{w['end']}" for w in wins) if wins else "all OFF"
+    flash(f"Schedule saved for {cname or cid} — {'ACTIVE' if active else 'inactive'}; ON {summary}. "
+          f"Dry-run (logged), nothing sent to Amazon.")
+    return redirect(f"/ppc/schedule?account={account_id}")
 
 
 @app.route("/ppc/schedule/save", methods=["POST"])
@@ -652,6 +930,7 @@ WORKLIST_HTML = """
       Bid suggestions are <b>not yet verified against the Ads API</b> — treat them as guidance, not an executable change.</div>
     <div class="kpis">
       <div class="kpi"><div class="lab">Pause</div><div class="val">{{ counts.get('pause',0) }}</div></div>
+      <div class="kpi"><div class="lab">Negative</div><div class="val">{{ counts.get('negative',0) }}</div></div>
       <div class="kpi"><div class="lab">Manual review</div><div class="val">{{ counts.get('manual_review',0) }}</div></div>
       <div class="kpi"><div class="lab">Harvest</div><div class="val">{{ counts.get('harvest',0) }}</div></div>
       <div class="kpi"><div class="lab">Bid down</div><div class="val">{{ counts.get('bid_down',0) }}</div></div>
@@ -692,8 +971,9 @@ WORKLIST_HTML = """
   {% endif %}
   {% endmacro %}
 
-  {{ tbl('Pause', 'Manual keywords with real click volume and zero sales — pause these in the Ads console.', by.get('pause',[]), 'pause') }}
-  {{ tbl('Manual review', 'Zero-sale terms below the confident-pause bar — eyeball before acting (manual → pause keyword; auto → negative exact).', by.get('manual_review',[]), 'review') }}
+  {{ tbl('Pause', 'Manual keywords, zero sales, ≥3 clicks & ≥£5 spent — pause these in the Ads console.', by.get('pause',[]), 'pause') }}
+  {{ tbl('Negative', 'Auto/product-target terms, zero sales, ≥3 clicks & ≥£5 spent — add each as a negative exact (only needs campaign/ad-group).', by.get('negative',[]), 'negative') }}
+  {{ tbl('Manual review', 'Zero-sale terms below the £5 confident-waste bar (≥5 clicks) — eyeball before acting (manual → pause keyword; auto → negative exact).', by.get('manual_review',[]), 'review') }}
   {{ tbl('Bid down', 'Converting keywords whose ACOS is too high — consider trimming the bid. Suggestion only; verify Target ID before any live change.', by.get('bid_down',[]), 'bid') }}
   {{ tbl('Harvest', 'Search terms that convert under auto/product targeting — add each as its own exact keyword to control the bid.', by.get('harvest',[]), 'harvest') }}
 </div></body></html>

@@ -19,6 +19,7 @@ from dashboard_app import app
 import dashboard_module1   # noqa: F401 -- registers Module 1 routes on `app`
 import dashboard_module2   # noqa: F401 -- registers Module 2 routes on `app`
 import dashboard_module3   # noqa: F401 -- registers Module 3 (PPC) routes on `app`
+import dashboard_expenses  # noqa: F401 -- registers Expenses/Overheads routes on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
@@ -28,6 +29,7 @@ import pl_ads
 import pl_price
 import pl_amazon
 import pl_ppc
+import pl_expenses
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +58,12 @@ def _bootstrap():
         ("price schema",             pl_price.init_price_schema),
         ("amazon schema",            pl_amazon.init_amazon_schema),
         ("ppc schema",               pl_ppc.init_ppc_schema),
+        ("expenses schema",          pl_expenses.init_expenses_schema),
         ("seed csvs",                pl_cogs.seed_from_csvs),
         ("seed confirmed asins",     pl_cogs.seed_confirmed_asin_pairs),
         ("seed asin from managed",   pl_cogs.seed_asin_from_managed_asins),
         ("asin consolidation",       pl_cogs.run_asin_consolidation),
+        ("migrate flat overheads",   pl_expenses.migrate_flat_overheads_from_cogs),
     ]
     for name, fn in steps:
         try:

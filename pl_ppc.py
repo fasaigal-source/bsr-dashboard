@@ -153,10 +153,11 @@ def init_ppc_schema(db_path=DB_PATH):
             created_at     TEXT NOT NULL
         )
         """,
-        # Phase C — per-campaign day-parting schedule. active=1 means the hourly
-        # scheduler manages this campaign's on/off. The simple daily ON window is
-        # [on_start_hour, on_end_hour); hour_mask (24 chars of '1'/'0') is the
-        # optional per-hour override that takes precedence when set (Phase: later).
+        # Phase C — per-campaign day-parting schedule. active=1 means the scheduler
+        # manages this campaign's on/off. Precedence when deciding the desired state:
+        #   slot_mask (96 chars of '1'/'0', one per 15-min slot) — the visual editor's
+        #   output and the primary control — then hour_mask (24 chars, legacy), then the
+        #   simple whole-hour [on_start_hour, on_end_hour) window.
         f"""
         CREATE TABLE IF NOT EXISTS ppc_campaign_schedule (
             account_id        TEXT NOT NULL,
@@ -166,6 +167,7 @@ def init_ppc_schema(db_path=DB_PATH):
             on_start_hour     INTEGER NOT NULL DEFAULT 0,
             on_end_hour       INTEGER NOT NULL DEFAULT 24,
             hour_mask         TEXT,
+            slot_mask         TEXT,
             last_desired_state TEXT,
             last_synced_at    TEXT,
             updated_at        TEXT,
@@ -195,6 +197,8 @@ def init_ppc_schema(db_path=DB_PATH):
     # Existence-checked (not a bare ALTER) so a duplicate doesn't poison the PG txn.
     if not _column_exists(conn, "ppc_campaign_schedule", "paused_until"):
         conn.execute("ALTER TABLE ppc_campaign_schedule ADD COLUMN paused_until TEXT")
+    if not _column_exists(conn, "ppc_campaign_schedule", "slot_mask"):
+        conn.execute("ALTER TABLE ppc_campaign_schedule ADD COLUMN slot_mask TEXT")
     # target-grain migration: older ppc_search_terms had no target_id (and thus a PK
     # that could collide two targets in one hour). Rebuild it to the shared ST_DDL,
     # carrying old rows over with empty target/bid fields. Only runs once.
@@ -708,11 +712,15 @@ def get_campaign_tacos(account_id="all", db_path=DB_PATH):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MANUAL_MATCH = {"BROAD", "EXACT", "PHRASE"}
-# rule thresholds (tuned so the sample report yields 1 pause / 4 review / 60 harvest;
-# reasonable general defaults too)
-PAUSE_MIN_CLICKS = 8       # manual keyword, 0 sales, this many clicks → confident pause
-REVIEW_MIN_CLICKS = 5      # 0 sales, sub-threshold spend, this many clicks → human look
-REVIEW_MAX_SPEND = 5.0     # £ — below the "confident pause" spend, so route to review
+# LOCKED rule (reproduces 1 pause / 4 review / 60 harvest on the sample):
+#   confident waste  = 0 sales AND clicks >= 3 AND spend >= £5   → pause (manual) / negative (auto)
+#   sub-£5 high-click= 0 sales AND spend < £5 AND clicks >= 5     → manual-review
+# NB the trigger is SPEND-based (£5+), not a clicks>=8 heuristic — the two only
+# coincide on the sample; keep the code on the locked spend rule.
+WASTE_MIN_CLICKS = 3       # confident-waste click floor
+WASTE_MIN_SPEND = 5.0      # £ — confident-waste spend floor (at/above → pause or negative)
+REVIEW_MIN_CLICKS = 5      # sub-£5 but this many clicks, 0 sales → human look
+REVIEW_MAX_SPEND = 5.0     # £ — below the confident-waste spend, so route to review
 HARVEST_MIN_ORDERS = 1     # non-manual (auto/product) term with ≥ this many orders → harvest
 BID_DOWN_ACOS = 0.50       # converting manual keyword above this ACOS → suggest a lower bid
 BID_DOWN_FACTOR = 0.75     # suggested new bid = current × this (a 25% trim)
@@ -746,7 +754,7 @@ def rebuild_recommendations(account_id, db_path=DB_PATH):
     """, (account_id,)).fetchall()
 
     now = _now()
-    counts = {"pause": 0, "manual_review": 0, "harvest": 0, "bid_down": 0}
+    counts = {"pause": 0, "negative": 0, "manual_review": 0, "harvest": 0, "bid_down": 0}
     harvest_terms = {}   # dedup harvest by search term (sum across its non-manual targets)
 
     def _add(rec_type, target, rationale, ev):
@@ -769,11 +777,17 @@ def rebuild_recommendations(account_id, db_path=DB_PATH):
               "current_bid": r["target_bid"],
               "action_hint": "keyword_pause" if manual else "negative_exact"}
 
-        # 1) PAUSE — manual keyword, real click volume, zero sales
-        if manual and orders == 0 and clicks >= PAUSE_MIN_CLICKS:
-            _add("pause", r["search_term"],
-                 f"Manual {r['match_raw']} keyword, {clicks} clicks / £{spend:.2f}, 0 sales — pause it.", ev)
-        # 2) MANUAL REVIEW — zero sales, some spend but below the confident-pause bar
+        # 1) CONFIDENT WASTE — 0 sales, clicks >= 3, spend >= £5. Manual → pause the
+        #    keyword; auto/other → add a negative exact (needs only campaign/ad-group).
+        if orders == 0 and clicks >= WASTE_MIN_CLICKS and spend >= WASTE_MIN_SPEND:
+            if manual:
+                _add("pause", r["search_term"],
+                     f"Manual {r['match_raw']} keyword, {clicks} clicks / £{spend:.2f}, 0 sales — pause it.", ev)
+            else:
+                ev["action_hint"] = "negative_exact"
+                _add("negative", r["search_term"],
+                     f"Auto/other term, {clicks} clicks / £{spend:.2f}, 0 sales — add as a negative exact.", ev)
+        # 2) MANUAL REVIEW — 0 sales, sub-£5 spend but high click volume
         elif orders == 0 and spend < REVIEW_MAX_SPEND and clicks >= REVIEW_MIN_CLICKS:
             hint = "negative_exact" if not manual else "keyword_pause"
             ev["action_hint"] = hint
@@ -871,6 +885,85 @@ def desired_state_for_hour(sched, hour):
     return "enabled" if on else "paused"
 
 
+# ── 15-minute slot schedule (the visual editor's model) ──────────────────────
+SLOT_MINUTES = 15
+SLOTS_PER_DAY = 24 * 60 // SLOT_MINUTES   # 96
+
+
+def slot_index(hour, minute):
+    """0..95 — which 15-min slot of the day a (hour, minute) falls in."""
+    return (int(hour) * 60 + int(minute)) // SLOT_MINUTES
+
+
+def current_slot(tzname=None):
+    """The current 15-min slot (0..95) in the scheduling timezone (ADS_TZ)."""
+    import os as _os
+    tzname = tzname or _os.environ.get("ADS_TZ", "Europe/London")
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(tzname))
+    except Exception:
+        now = datetime.now(timezone.utc)
+    return slot_index(now.hour, now.minute)
+
+
+def window_to_slot_mask(on_start_hour, on_end_hour):
+    """Build a 96-char slot mask from a legacy whole-hour [start, end) window
+    (wraps midnight if start > end). Used to seed the editor from an old schedule."""
+    s = int(on_start_hour or 0)
+    e = int(on_end_hour if on_end_hour is not None else 24)
+    out = []
+    for idx in range(SLOTS_PER_DAY):
+        hour = idx // 4
+        on = (s <= hour < e) if s <= e else (hour >= s or hour < e)
+        out.append("1" if on else "0")
+    return "".join(out)
+
+
+def _normalize_slot_mask(m):
+    m = (m or "").strip()
+    if len(m) == SLOTS_PER_DAY and set(m) <= {"0", "1"}:
+        return m
+    return None
+
+
+def desired_state_for_slot(sched, slot_idx):
+    """'enabled'/'paused' at a given 15-min slot. Precedence: slot_mask (96) →
+    hour_mask (24, legacy) → whole-hour window."""
+    sm = _normalize_slot_mask(sched.get("slot_mask"))
+    if sm:
+        return "enabled" if sm[slot_idx] == "1" else "paused"
+    return desired_state_for_hour(sched, slot_idx // 4)   # legacy fallbacks
+
+
+def slot_mask_to_windows(mask):
+    """Turn a 96-char slot mask into readable ON windows, e.g.
+    [{'start':'09:00','end':'17:30'}]. Merges a midnight-wrap (23:45→00:00) run."""
+    sm = _normalize_slot_mask(mask)
+    if not sm:
+        return None
+
+    def hhmm(idx):
+        mins = (idx % SLOTS_PER_DAY) * SLOT_MINUTES
+        return f"{mins // 60:02d}:{mins % 60:02d}"
+
+    windows, i = [], 0
+    while i < SLOTS_PER_DAY:
+        if sm[i] == "1":
+            j = i
+            while j < SLOTS_PER_DAY and sm[j] == "1":
+                j += 1
+            windows.append([i, j])   # [start_slot, end_slot) ; end can be 96 == 00:00
+            i = j
+        else:
+            i += 1
+    # merge midnight wrap: last run ends at 96 and first starts at 0
+    if len(windows) >= 2 and windows[0][0] == 0 and windows[-1][1] == SLOTS_PER_DAY:
+        first = windows.pop(0)
+        windows[-1][1] = SLOTS_PER_DAY + first[1]
+    return [{"start": hhmm(a), "end": hhmm(b)} for a, b in windows]
+
+
 def _parse_iso(s):
     if not s:
         return None
@@ -893,16 +986,16 @@ def is_snoozed(sched, now_dt=None):
     return pu > now_dt
 
 
-def desired_state_now(sched, now_hour, now_dt=None):
-    """The state a campaign should be in RIGHT NOW. A temporary pause (snooze)
-    overrides everything; otherwise the day-parting window if the schedule is active;
-    otherwise 'enabled' — which is only ever applied to resume a snoozed campaign that
-    isn't on the auto-schedule (a plain untracked campaign is never touched: see the
-    reconciler, which skips rows that are neither active nor snoozed)."""
+def desired_state_now(sched, now_slot, now_dt=None):
+    """The state a campaign should be in RIGHT NOW, given the current 15-min slot
+    (0..95). A temporary pause (snooze) overrides everything; otherwise the day-parting
+    schedule if active; otherwise 'enabled' — only ever applied to resume a snoozed
+    campaign that isn't on the auto-schedule (a plain untracked campaign is never
+    touched: the reconciler skips rows that are neither active nor snoozed)."""
     if is_snoozed(sched, now_dt):
         return "paused"
     if sched.get("active"):
-        return desired_state_for_hour(sched, now_hour)
+        return desired_state_for_slot(sched, now_slot)
     return "enabled"
 
 
@@ -954,8 +1047,11 @@ def account_for_campaign(campaign_id, db_path=DB_PATH):
 
 
 def upsert_schedule(account_id, campaign_id, campaign_name=None, active=None,
-                    on_start_hour=None, on_end_hour=None, hour_mask=None, db_path=DB_PATH):
-    """Create or update a campaign's schedule. Only non-None fields are changed."""
+                    on_start_hour=None, on_end_hour=None, hour_mask=None,
+                    slot_mask=None, db_path=DB_PATH):
+    """Create or update a campaign's schedule. Only non-None fields are changed.
+    slot_mask (96 chars '1'/'0', 15-min slots) is the visual editor's output and takes
+    precedence in desired_state_for_slot."""
     conn = get_db(db_path)
     now = _now()
     existing = conn.execute(
@@ -969,20 +1065,23 @@ def upsert_schedule(account_id, campaign_id, campaign_name=None, active=None,
             on_start_hour=int(on_start_hour) if on_start_hour is not None else cur.get("on_start_hour"),
             on_end_hour=int(on_end_hour) if on_end_hour is not None else cur.get("on_end_hour"),
             hour_mask=hour_mask if hour_mask is not None else cur.get("hour_mask"),
+            slot_mask=slot_mask if slot_mask is not None else cur.get("slot_mask"),
         )
         conn.execute("""UPDATE ppc_campaign_schedule SET campaign_name=?, active=?,
-                        on_start_hour=?, on_end_hour=?, hour_mask=?, updated_at=?
+                        on_start_hour=?, on_end_hour=?, hour_mask=?, slot_mask=?, updated_at=?
                         WHERE account_id=? AND campaign_id=?""",
                      (vals["campaign_name"], vals["active"], vals["on_start_hour"],
-                      vals["on_end_hour"], vals["hour_mask"], now, account_id, campaign_id))
+                      vals["on_end_hour"], vals["hour_mask"], vals["slot_mask"], now,
+                      account_id, campaign_id))
     else:
         conn.execute("""INSERT INTO ppc_campaign_schedule
                         (account_id, campaign_id, campaign_name, active, on_start_hour,
-                         on_end_hour, hour_mask, updated_at)
-                        VALUES (?,?,?,?,?,?,?,?)""",
+                         on_end_hour, hour_mask, slot_mask, updated_at)
+                        VALUES (?,?,?,?,?,?,?,?,?)""",
                      (account_id, campaign_id, campaign_name, int(active or 0),
                       int(on_start_hour if on_start_hour is not None else 0),
-                      int(on_end_hour if on_end_hour is not None else 24), hour_mask, now))
+                      int(on_end_hour if on_end_hour is not None else 24),
+                      hour_mask, slot_mask, now))
     conn.commit()
     conn.close()
 
