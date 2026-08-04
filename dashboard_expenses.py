@@ -58,8 +58,9 @@ EXPENSES_HTML = """
     <form method="POST" action="/pl/expenses/add" style="margin-top:10px;">
       <div class="row">
         <div><label>Type</label>
-          <select name="kind" id="kindSel" onchange="expToggleKind()">
-            <option value="recurring">Recurring (monthly)</option>
+          <select name="etype" id="kindSel" onchange="expToggleKind()">
+            <option value="monthly">Recurring — monthly</option>
+            <option value="weekly">Recurring — weekly</option>
             <option value="oneoff">One-off (dated)</option>
           </select></div>
         <div><label>Category</label><input type="text" name="category" list="catList" placeholder="rent, labour, packaging…" required>
@@ -82,17 +83,20 @@ EXPENSES_HTML = """
   </div>
 
   <div class="card">
-    <h2 style="font-size:15px;">Recurring overheads (monthly)</h2>
+    <h2 style="font-size:15px;">Recurring overheads</h2>
+    <div class="muted">These apply to <b>every</b> month/week from their start date onward — pro-rated to whatever date range you view on the <a href="/pl">P&amp;L</a>. "To date" shows what's accrued from the start until today, so you can see it really is charged every period.</div>
     {% if recurring %}
-    <table>
-      <thead><tr><th>Category</th><th>Account</th><th>£/month</th><th>Active from</th><th>Until</th><th>Note</th><th></th></tr></thead>
+    <table style="margin-top:8px;">
+      <thead><tr><th>Category</th><th>Account</th><th>Amount</th><th>Every</th><th>Active from</th><th>To date</th><th>Until</th><th>Note</th><th></th></tr></thead>
       <tbody>
       {% for r in recurring %}
         <tr>
           <td>{{ r.category }}</td>
           <td><span class="pill {{ 'shared' if r.account_id=='shared' else '' }}">{{ r.account_id }}</span></td>
           <td>£{{ "%.2f"|format(r.amount or 0) }}</td>
+          <td>{{ r.frequency or 'monthly' }}</td>
           <td>{{ r.start_date or '—' }}</td>
+          <td title="Accrued from {{ r.start_date }} to today">£{{ "%.2f"|format(r.to_date or 0) }}</td>
           <td>
             {% if r.end_date %}{{ r.end_date }}{% else %}
             <form method="POST" action="/pl/expenses/end" style="display:inline-flex;gap:4px;align-items:center;">
@@ -133,11 +137,11 @@ EXPENSES_HTML = """
 <script>
   function expToggleKind(){
     var k = document.getElementById("kindSel").value;
-    var rec = k === "recurring";
+    var rec = (k === "monthly" || k === "weekly");
     document.getElementById("fldStart").style.display = rec ? "" : "none";
     document.getElementById("fldEnd").style.display = rec ? "" : "none";
     document.getElementById("fldOn").style.display = rec ? "none" : "";
-    document.getElementById("amtHint").textContent = rec ? " /month" : " (total)";
+    document.getElementById("amtHint").textContent = k === "weekly" ? " /week" : (k === "monthly" ? " /month" : " (total)");
   }
   expToggleKind();
 </script>
@@ -152,25 +156,28 @@ def expenses_page():
     except Exception:
         accounts = []
     rows = pl_expenses.list_overheads()
-    recurring = [r for r in rows if r["kind"] == "recurring"]
+    recurring = [dict(r) for r in rows if r["kind"] == "recurring"]
+    for r in recurring:
+        r["to_date"] = pl_expenses.to_date(r)
     oneoffs = [r for r in rows if r["kind"] == "oneoff"]
-    # run-rate = active recurring (no end date, or end date in the future)
-    import datetime as _dt
-    today = _dt.date.today().isoformat()
-    runrate = sum((r["amount"] or 0) for r in recurring
-                  if not r["end_date"] or str(r["end_date"])[:10] >= today)
+    runrate = pl_expenses.monthly_run_rate(rows)   # weekly folded in as ×52/12
     return render_template_string(
         EXPENSES_HTML, accounts=accounts, recurring=recurring, oneoffs=oneoffs,
-        monthly_runrate=round(runrate, 2))
+        monthly_runrate=runrate)
 
 
 @app.route("/pl/expenses/add", methods=["POST"])
 def expenses_add():
     f = request.form
+    etype = (f.get("etype") or f.get("kind") or "monthly").lower()
+    if etype in ("monthly", "weekly"):
+        kind, frequency = "recurring", etype
+    else:
+        kind, frequency = "oneoff", None
     try:
         pl_expenses.add_overhead(
             account_id=f.get("account_id") or "shared",
-            kind=f.get("kind"), category=f.get("category"),
+            kind=kind, frequency=frequency, category=f.get("category"),
             amount=f.get("amount"), start_date=f.get("start_date"),
             end_date=f.get("end_date"), on_date=f.get("on_date"), note=f.get("note"))
         flash("Expense added.")

@@ -1243,12 +1243,8 @@ def pl_page():
     # (+ 'shared'); the range summary shows the precise day-pro-rated figure incl. one-offs.
     try:
         import pl_expenses as _plx
-        import datetime as _pxdt
-        _today = _pxdt.date.today().isoformat()
         _oh_rows = _plx.list_overheads(None if account_filter == "all" else account_filter)
-        overhead_monthly = round(sum(
-            (r["amount"] or 0) for r in _oh_rows
-            if r["kind"] == "recurring" and (not r["end_date"] or str(r["end_date"])[:10] >= _today)), 2)
+        overhead_monthly = _plx.monthly_run_rate(_oh_rows)   # weekly folded in (×52/12)
     except Exception:
         overhead_monthly = 0.0
 

@@ -53,8 +53,9 @@ def init_expenses_schema(db_path=DB_PATH):
             id          {IDCOL},
             account_id  TEXT NOT NULL,          -- 'M4Mart_UK' | second account | 'shared'
             kind        TEXT NOT NULL,          -- 'recurring' | 'oneoff'
+            frequency   TEXT,                   -- recurring: 'monthly' | 'weekly'  (NULL for oneoff)
             category    TEXT NOT NULL,          -- rent, labour, utilities, software, packaging, ...
-            amount      {MONEY} NOT NULL,       -- recurring: PER MONTH; oneoff: the whole cost
+            amount      {MONEY} NOT NULL,       -- recurring: PER month/week; oneoff: the whole cost
             start_date  TEXT,                   -- recurring: first active date (YYYY-MM-DD)
             end_date    TEXT,                   -- recurring: last active date (NULL = ongoing)
             on_date     TEXT,                   -- oneoff: the date it hit (YYYY-MM-DD)
@@ -62,30 +63,52 @@ def init_expenses_schema(db_path=DB_PATH):
             created_at  TEXT NOT NULL
         )
     """)
+    # additive migration: frequency column; existing recurring rows are monthly.
+    if not _has_col(conn, "pl_overheads", "frequency"):
+        conn.execute("ALTER TABLE pl_overheads ADD COLUMN frequency TEXT")
+    conn.execute("UPDATE pl_overheads SET frequency='monthly' WHERE kind='recurring' AND (frequency IS NULL OR frequency='')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_overheads_acct ON pl_overheads(account_id, kind)")
     conn.commit()
     conn.close()
     log.info("Overheads schema initialised.")
 
 
+def _has_col(conn, table, col):
+    if db.is_postgres():
+        return conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name=? AND column_name=?",
+            (table, col)).fetchone() is not None
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any((r["name"] if not isinstance(r, (tuple, list)) else r[1]) == col for r in rows)
+
+
 # ── CRUD ─────────────────────────────────────────────────────────────────────
 
+VALID_FREQ = ("monthly", "weekly")
+
+
 def add_overhead(account_id, kind, category, amount, start_date=None, end_date=None,
-                 on_date=None, note=None, db_path=DB_PATH):
+                 on_date=None, note=None, frequency=None, db_path=DB_PATH):
     if kind not in VALID_KINDS:
         raise ValueError(f"kind must be one of {VALID_KINDS}")
     if not category or not str(category).strip():
         raise ValueError("category is required")
     amount = float(amount)
-    if kind == "recurring" and not start_date:
-        raise ValueError("recurring overhead needs a start date")
-    if kind == "oneoff" and not on_date:
-        raise ValueError("one-off expense needs a date")
+    if kind == "recurring":
+        frequency = (frequency or "monthly").lower()
+        if frequency not in VALID_FREQ:
+            raise ValueError(f"frequency must be one of {VALID_FREQ}")
+        if not start_date:
+            raise ValueError("recurring overhead needs a start date")
+    else:
+        frequency = None
+        if not on_date:
+            raise ValueError("one-off expense needs a date")
     conn = get_db(db_path)
     conn.execute(
-        "INSERT INTO pl_overheads (account_id, kind, category, amount, start_date, "
-        "end_date, on_date, note, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (account_id, kind, category.strip(), amount,
+        "INSERT INTO pl_overheads (account_id, kind, frequency, category, amount, start_date, "
+        "end_date, on_date, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (account_id, kind, frequency, category.strip(), amount,
          (start_date or None) if kind == "recurring" else None,
          (end_date or None) if kind == "recurring" else None,
          (on_date or None) if kind == "oneoff" else None,
@@ -158,12 +181,15 @@ def compute_overheads(account_id, start_date, end_date, db_path=DB_PATH):
             if a_end < a_start:
                 continue
             days = (a_end - a_start).days + 1
-            period_amt = round(amt * days / _DAYS_PER_MONTH, 2)
+            per_day = amt / (7.0 if r.get("frequency") == "weekly" else _DAYS_PER_MONTH)
+            period_amt = round(per_day * days, 2)
             if period_amt <= 0:
                 continue
             recurring_total += period_amt
-            lines.append({"id": r["id"], "kind": "recurring", "category": r["category"],
-                          "account_id": r["account_id"], "monthly": round(amt, 2),
+            lines.append({"id": r["id"], "kind": "recurring",
+                          "frequency": r.get("frequency") or "monthly",
+                          "category": r["category"], "account_id": r["account_id"],
+                          "amount": round(amt, 2), "monthly": round(amt, 2),
                           "period_amount": period_amt, "active_days": days,
                           "note": r.get("note")})
         else:  # oneoff
@@ -178,6 +204,42 @@ def compute_overheads(account_id, start_date, end_date, db_path=DB_PATH):
     lines.sort(key=lambda x: -x["period_amount"])
     return {"total": total, "recurring": round(recurring_total, 2),
             "oneoff": round(oneoff_total, 2), "days": (e - s).days + 1, "lines": lines}
+
+
+def monthly_equiv(amount, frequency):
+    """A weekly figure expressed as a monthly run-rate (× 52/12); monthly stays as-is."""
+    amount = float(amount or 0)
+    return amount * (52.0 / 12.0) if frequency == "weekly" else amount
+
+
+def monthly_run_rate(rows, today=None):
+    """Sum of currently-active recurring overheads as a monthly figure (weekly → ×52/12)."""
+    d = (today or date.today().isoformat())[:10]
+    tot = 0.0
+    for r in rows:
+        if r["kind"] != "recurring":
+            continue
+        if r["end_date"] and str(r["end_date"])[:10] < d:
+            continue
+        tot += monthly_equiv(r["amount"], r.get("frequency"))
+    return round(tot, 2)
+
+
+def to_date(row, today=None):
+    """Cumulative cost of a recurring row from its start to today (or its end date if
+    earlier) — so the page can show that it really has accrued every month/week."""
+    s = _d(row.get("start_date"))
+    if not s:
+        return 0.0
+    e = _d(today) or date.today()
+    end = _d(row.get("end_date"))
+    if end and end < e:
+        e = end
+    if e < s:
+        return 0.0
+    days = (e - s).days + 1
+    per_day = float(row["amount"] or 0) / (7.0 if row.get("frequency") == "weekly" else _DAYS_PER_MONTH)
+    return round(per_day * days, 2)
 
 
 # ── one-time migration: legacy flat overhead (pl_cogs.cogs_overheads) → recurring ──
