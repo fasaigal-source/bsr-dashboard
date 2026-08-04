@@ -796,7 +796,8 @@ PL_HTML = """
       if (chips.length){
         activeEl.style.display = "block";
         activeEl.innerHTML = chips.length + " filter" + (chips.length===1?"":"s") + " active: " +
-          chips.map(function(c){ return '<span class="chip">' + c.replace(/</g,"&lt;") + '</span>'; }).join(" ");
+          chips.map(function(c){ return '<span class="chip">' + c.replace(/</g,"&lt;") + '</span>'; }).join(" ") +
+          ' <a href="javascript:void(0)" onclick="plClearAllFilters()" style="margin-left:10px;font-weight:700;color:#0e5c5b;text-decoration:underline;white-space:nowrap;">✕ Show all products</a>';
       } else {
         activeEl.style.display = "none";
         activeEl.innerHTML = "";
