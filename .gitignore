@@ -22,6 +22,7 @@
 !/dashboard_module2.py
 !/dashboard_module3.py
 !/dashboard_expenses.py
+!/dashboard_channels.py
 
 # data layer + read-only collector mapping
 !/db.py
@@ -43,6 +44,12 @@
 !/pl_expenses.py
 !/ppc_ads_api.py
 !/ppc_scheduler.py
+
+# Module 5 (Mirakl: Tesco + B&Q)
+!/mirakl_db.py
+!/mirakl_client.py
+!/mirakl_sync.py
+!/mirakl_worker.py
 
 # seed CSVs the app reads at boot
 !/sku_aliases.csv

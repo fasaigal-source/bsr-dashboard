@@ -26,6 +26,7 @@ COLLECTOR_STATUS_URL = "https://web-production-de115.up.railway.app/"
 # Unified menu. (href, label). Module 1 sections, then Module 2 sections.
 _NAV_ITEMS = [
     ("/", "Home"),
+    ("/channels", "Channels"),
     ("/products", "Products"),
     ("/baseline", "Market baseline"),
     ("__sep__", ""),
