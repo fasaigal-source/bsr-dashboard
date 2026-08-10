@@ -404,17 +404,20 @@ def fetch_label_events_for_order(credentials, marketplace, order_id):
     once its refund group is the most recent one, rather than double-counting
     both the original charge AND its later refund).
 
-    Returns a list of groups, NEWEST first:
+    Returns a TUPLE (label_groups, refund_lines):
+      label_groups — list, NEWEST first:
         [{"posted_date": ..., "vat": <signed sum of *_VAT>,
           "base": <signed sum of every other component>,
           "currency": ..., "components": {AdjustmentType: amount}}, ...]
-    More than one group = more than one label-purchase event was found for
-    this order (a replacement/reprinted label, or separate charge+refund
-    groups) -- see resolve_effective_label_group for the policy on that.
-    Empty list = no Buy-Shipping label event exists for this order at all —
-    the genuine off-Amazon-courier case; postage stays 'estimated'."""
+        More than one group = more than one label-purchase event (a replacement/
+        reprint, or separate charge+refund groups) — see resolve_effective_label_
+        group. Empty list = no Buy-Shipping label at all (genuine off-Amazon case).
+      refund_lines — parsed RefundEventList line dicts (module2_refund_perorder),
+        ready for _record_line; refunds are ONLY in this per-order feed, not the
+        windowed pull, so this is where we harvest them."""
     client = Finances(credentials=credentials, marketplace=marketplace, timeout=HTTP_TIMEOUT_SECONDS)
     groups = {}
+    refund_lines = []
     next_token = None
     while True:
         kwargs = {"NextToken": next_token} if next_token else {"MaxResultsPerPage": 100}
@@ -422,11 +425,18 @@ def fetch_label_events_for_order(credentials, marketplace, order_id):
         payload = resp.payload or {}
         fe = payload.get("FinancialEvents", {}) or {}
         _accumulate_postage_adjustments(fe.get("AdjustmentEventList", []) or [], groups)
+        # module2_refund_perorder: customer REFUNDS are only reliably present in THIS
+        # per-order response, not the windowed listFinancialEvents pull (confirmed: the
+        # windowed feed returned 0 refunds account-wide while this endpoint returns the
+        # RefundEventList) -- the exact same architectural reason labels moved per-order.
+        # Harvest them from the same payload we already fetched (no extra API call).
+        for event in fe.get("RefundEventList", []) or []:
+            refund_lines.extend(parse_event(event, "refund"))
         next_token = payload.get("NextToken")
         time.sleep(2.1)   # Finances API: pace well under the burst limit
         if not next_token:
             break
-    return sorted(groups.values(), key=lambda g: g["posted_date"], reverse=True)
+    return sorted(groups.values(), key=lambda g: g["posted_date"], reverse=True), refund_lines
 
 
 def _accumulate_postage_adjustments(adjustment_event_list, groups):
@@ -774,7 +784,15 @@ def run_pl_job(since_days=None):
             log.info(f"  Looking up real label cost for {len(orders_needing_label)} order(s) "
                      f"without one yet (per-order Finances call, ~2.1s each)...")
         for order_id in orders_needing_label:
-            groups = fetch_label_events_for_order(credentials, marketplace, order_id)
+            groups, refund_lines = fetch_label_events_for_order(credentials, marketplace, order_id)
+            # module2_refund_perorder: record any refunds this per-order call surfaced
+            # (dedup-safe via uq_pl_raw_event; added to `touched` so the final pass
+            # recomputes the order's P&L). NB this only covers orders being fetched for a
+            # label; late refunds on already-labelled orders are recovered by the
+            # scheduled per-order refund recheck (backfill_refunds.py).
+            for ln in refund_lines:
+                _record_line(ln, account_id, summary)
+                touched.add((ln["order_id"], ln["order_item_id"]))
             if not groups:
                 summary["label_orders_off_amazon"] = summary.get("label_orders_off_amazon", 0) + 1
                 continue
