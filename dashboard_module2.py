@@ -296,6 +296,14 @@ PL_HTML = """
   <div class="card">
     <div class="card-head">
       <div class="title">Per-product rollup{% if account_filter != "all" %} — {{ account_filter }}{% endif %}</div>
+      <div class="hint" style="margin:-4px 0 8px;">
+        <b>Break-even &amp; target (inc-VAT, per unit):</b> Direct = COGS + Amazon fees + label + averaged refund cost ·
+        +Ads adds this ASIN's ad-cost/unit · All-in adds a per-unit overhead share (overhead allocated by units) ·
+        Target = All-in ÷ 0.90 (10% net margin). It's a <b>live</b> number — moves with ad spend and volume.
+        Non-push ASINs priced below All-in break-even show <span class="neg">red</span>;
+        <span class="badge" style="background:#fbe7c6;color:#8a5906;">push</span> ASINs below break-even are shown as info, not an alarm.
+        {% if breakeven_provisional %}<br><span style="color:#8a5906;">⚠ Provisional: no refund data captured for this range yet, so the refund layer is understated — not authoritative until the refund backfill lands. This note clears once refunds arrive.</span>{% endif %}
+      </div>
       <div class="col-picker">
         <button type="button" class="btn btn-sm" onclick="document.getElementById('colPickerPanel').style.display = document.getElementById('colPickerPanel').style.display==='block' ? 'none' : 'block'">⚙ Columns</button>
         <div class="col-picker-panel" id="colPickerPanel">
@@ -413,6 +421,10 @@ PL_HTML = """
         <th class="col-units sortable" data-key="units" onclick="plSortBy('units',this)">Units<span class="arrow"></span></th>
         <th class="col-gross sortable" data-key="gross" onclick="plSortBy('gross',this)">Gross sales (ex-VAT)<span class="arrow"></span></th>
         <th class="col-asp sortable" data-key="asp" onclick="plSortBy('asp',this)" title="Average selling price = gross sales inc-VAT ÷ units (per pack sold), over the selected date range.">Avg sell price (inc-VAT)<span class="arrow"></span></th>
+        <th class="be-col" title="Direct break-even (inc-VAT, per unit): COGS + Amazon fees + shipping label + this ASIN's averaged refund cost (its refund rate × the direct cost sunk per unit).">Direct BE</th>
+        <th class="be-col" title="+ Ad spend: Direct plus this ASIN's ad-cost-per-unit (its ad spend ÷ units / TACOS applied).">+Ads BE</th>
+        <th class="be-col" title="All-in break-even (inc-VAT): +Ads plus a per-unit overhead share — monthly overheads ÷ TOTAL units across all ASINs in the period (overhead allocated by units). LIVE: moves with ad spend and volume — that's correct, not a bug.">All-in BE</th>
+        <th class="be-col" title="Target price = All-in break-even ÷ 0.90 → a 10% NET margin on the sale price (not markup). Inc-VAT: the price to set.">Target price</th>
         <th class="col-referral_fees">Referral fees</th>
         <th class="col-other_fees">Other fees</th>
         <th class="col-promotions">Promotions</th>
@@ -486,6 +498,10 @@ PL_HTML = """
         <td class="col-units">{{ r.units or 0 }}</td>
         <td class="col-gross">£{{ "%.2f"|format(r.gross_sales_exvat or 0) }}</td>
         <td class="col-asp">{% if r.units %}£{{ "%.2f"|format((r.gross_sales_incvat or 0) / r.units) }}{% else %}—{% endif %}</td>
+        <td class="be-col">{% if r.be_direct is not none %}£{{ "%.2f"|format(r.be_direct) }}{% else %}—{% endif %}</td>
+        <td class="be-col">{% if r.be_ads is not none %}£{{ "%.2f"|format(r.be_ads) }}{% else %}—{% endif %}</td>
+        <td class="be-col {{ 'neg' if r.below_breakeven else '' }}">{% if r.be_allin is not none %}£{{ "%.2f"|format(r.be_allin) }}{% if r.is_push %} <span class="badge" style="background:#fbe7c6;color:#8a5906;" title="Push mode — deliberately below break-even (rank-buying); shown as info, not an alarm.">push</span>{% endif %}{% else %}—{% endif %}</td>
+        <td class="be-col"><b>{% if r.target_price is not none %}£{{ "%.2f"|format(r.target_price) }}{% else %}—{% endif %}</b></td>
         <td class="col-referral_fees">£{{ "%.2f"|format(r.referral_fees or 0) }}</td>
         <td class="col-other_fees">£{{ "%.2f"|format(r.other_fees or 0) }}</td>
         <td class="col-promotions">£{{ "%.2f"|format(r.promotions or 0) }}</td>
@@ -1128,6 +1144,21 @@ def pl_page():
     today_str = datetime.utcnow().strftime("%Y-%m-%d")
     canonical_rows, ad_orphans = pl_ads.attach_ad_spend_to_rollup(
         canonical_rows, account_id=account_filter, start_date=start_date, end_date=None)
+
+    # module2_breakeven: layered break-even + target price (calculated column, no writes).
+    try:
+        _refunded_units = pl_db.get_refunded_units_by_canonical(account_filter, start_date=start_date)
+    except Exception:
+        _refunded_units = {}
+    try:
+        _push_set = pl_db.get_push_canonicals(account_filter)
+    except Exception:
+        _push_set = set()
+    pl_db.attach_breakeven(canonical_rows, overheads_total=(overheads_period or 0.0),
+                           refunded_units=_refunded_units, push_set=_push_set)
+    # Not authoritative until the refund backfill lands: if no refund units are captured
+    # yet, the refund layer is understated — surface a caveat that self-clears once refunds arrive.
+    breakeven_provisional = (sum(_refunded_units.values()) == 0)
     ad_coverage_warning = pl_ads.get_coverage_warning(
         account_id=account_filter, viewed_start=start_date, viewed_end=today_str)
     # module2_pl_ui_fixes Fix 6: exposed per-row (not just as a page-level
@@ -1319,7 +1350,7 @@ def pl_page():
         postage_manual_total=postage_manual_total, postage_missing_total=postage_missing_total,
         postage_week_count=postage_week_count,
         unpriced_total=unpriced_total, overhead_monthly=overhead_monthly,
-        overheads_period=overheads_period,
+        overheads_period=overheads_period, breakeven_provisional=breakeven_provisional,
         range_key=range_key, range_start=range_start, range_end=range_end,
         last_synced=last_synced, last_synced_iso=last_synced_iso,
         ad_orphans=ad_orphans, ad_coverage_warning=ad_coverage_warning,
@@ -2854,6 +2885,29 @@ SKU_DETAIL_HTML = """
             {% endif %}
           {% else %}<span class="muted">no units sold in this range</span>{% endif %}
         </div>
+
+        <div class="k" style="margin-top:14px;">Break-even &amp; target price — layered (inc-VAT, per unit)</div>
+        <div class="v">
+          {% if row.be_allin is not none %}
+          <table style="font-size:13px;border-collapse:collapse;">
+            <tr><td style="padding:2px 16px 2px 0;">Direct break-even</td><td>£{{ "%.2f"|format(row.be_direct) }} <span class="muted" style="font-weight:400;">COGS + Amazon fees + label + refund</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;">+ Ad spend</td><td>£{{ "%.2f"|format(row.be_ads) }} <span class="muted" style="font-weight:400;">+ ad-cost per unit</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;">All-in break-even</td><td class="{{ 'neg' if row.below_breakeven else '' }}">£{{ "%.2f"|format(row.be_allin) }} <span class="muted" style="font-weight:400;">+ overhead £{{ "%.2f"|format(row.overhead_pu or 0) }}/unit (allocated by units)</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;"><b>Target price</b></td><td><b>£{{ "%.2f"|format(row.target_price) }}</b> <span class="muted" style="font-weight:400;">= all-in ÷ 0.90 (10% net margin)</span></td></tr>
+          </table>
+          {% else %}<span class="muted">no units sold in this range</span>{% endif %}
+        </div>
+        <div class="hint">
+          {% if row.is_push %}<span class="badge" style="background:#fbe7c6;color:#8a5906;">push mode</span> below break-even is expected (rank-buying) — information, not an alarm.{% elif row.below_breakeven %}<span class="neg"><b>Below all-in break-even</b></span> — selling under true cost.{% endif %}
+          A <b>live</b> number — moves with ad spend and volume (that's correct). Target is a 10% <b>net</b> margin on the sale price, not a markup.
+          {% if breakeven_provisional %}<br><span style="color:#8a5906;">⚠ Provisional — no refund data captured for this range yet (refund backfill pending), so the refund layer is understated. Clears once refunds arrive.</span>{% endif %}
+          <form method="POST" action="/pl/sku/{{ canonical_sku|urlencode }}/push" style="margin-top:8px;">
+            <input type="hidden" name="account_id" value="{{ row.account_id or account_filter }}">
+            <input type="hidden" name="return_url" value="{{ self_url }}">
+            <input type="hidden" name="push" value="{{ '0' if row.is_push else '1' }}">
+            <button class="btn btn-sm" type="submit">{{ 'Unset push mode' if row.is_push else 'Mark as push (rank-buying)' }}</button>
+          </form>
+        </div>
         <div class="hint">Average <b>revenue</b> per unit actually realised over the selected range (gross sales ex-VAT ÷ units).
           This <b>includes buyer-paid shipping</b>, so it is <b>not</b> a listing price — expect it to differ from both
           the "Live Amazon listing price" and "Recorded selling price" above. inc-VAT multiplies this product's stored
@@ -3060,6 +3114,23 @@ def pl_sku_detail(canonical_sku):
     row["family"] = identity["family"]
     row["product_type"] = identity["product_type"]
 
+    # module2_breakeven: the same layered break-even /pl shows, for this one SKU.
+    # Overhead is allocated over ACCOUNT-WIDE units (not just this SKU) so it matches /pl.
+    _acct_be = row.get("account_id") or account_filter
+    try:
+        import pl_expenses as _plx
+        _oh_range = pl_db.resolve_pl_date_range(_acct_be, start_date=start_date)
+        _oh_total = _plx.compute_overheads(_acct_be, _oh_range[0], _oh_range[1]).get("total", 0.0) if _oh_range[0] else 0.0
+        pl_db.attach_breakeven(
+            [row], overheads_total=_oh_total,
+            refunded_units=pl_db.get_refunded_units_by_canonical(_acct_be, start_date=start_date),
+            push_set=pl_db.get_push_canonicals(_acct_be),
+            total_units=pl_db.get_total_units(_acct_be, start_date))
+        breakeven_provisional = (pl_db.get_total_units(_acct_be, start_date) or 0) and \
+            not sum(pl_db.get_refunded_units_by_canonical(_acct_be, start_date=start_date).values())
+    except Exception:
+        breakeven_provisional = True
+
     gross = row.get("gross_sales_exvat") or 0
     after_ads = row.get("net_profit_after_ads")
     margin_pct_after_ads = (after_ads / gross) if (after_ads is not None and gross) else None
@@ -3233,9 +3304,25 @@ def pl_sku_detail(canonical_sku):
         family_sku_counts=family_sku_counts,
         projected_profit_per_unit=projected_profit_per_unit, projected_margin_pct=projected_margin_pct,
         asp_exvat=asp_exvat, asp_incvat=asp_incvat, asp_vat_rate=asp_vat_rate,
+        breakeven_provisional=breakeven_provisional,
         sku_range_start=sku_range_start, sku_range_end=sku_range_end,
         tax_code_info=tax_code_info, live_price_info=live_price_info, vat_mismatch=vat_mismatch,
     )
+
+
+@app.route("/pl/sku/<path:canonical_sku>/push", methods=["POST"])
+def pl_sku_push_toggle(canonical_sku):
+    """Mark/unmark this SKU as PUSH mode (deliberate below-break-even rank-buying).
+    Below-break-even is shown as info (not red) for push ASINs. No Amazon write."""
+    account_id = (request.form.get("account_id") or "").strip()
+    on = request.form.get("push") == "1"
+    return_url = request.form.get("return_url") or f"/pl/sku/{canonical_sku}"
+    if account_id and account_id != "all":
+        pl_db.set_push_canonical(account_id, canonical_sku, on)
+        flash(f"{canonical_sku}: push mode {'ON' if on else 'off'}.")
+    else:
+        flash("Pick a specific account (not 'all') to set push mode.")
+    return redirect(return_url)
 
 
 @app.route("/pl/sku/<path:canonical_sku>/price", methods=["POST"])

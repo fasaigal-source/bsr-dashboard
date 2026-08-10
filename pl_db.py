@@ -307,6 +307,33 @@ def init_pl_schema(db_path=DB_PATH):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_posted ON pl_line_items(posted_date)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pl_line_postage_source ON pl_line_items(account_id, postage_source)")
     conn.commit()
+    # module2_raw_dedup: the UNIQUE(account_id, order_id, order_item_id, event_type,
+    # posted_date) that insert_raw_event's `ON CONFLICT DO NOTHING` relies on lives in
+    # the CREATE TABLE (SQLite) but was DROPPED when migrate_to_railway rebuilt the
+    # table from a column dict on Postgres -> re-pulls duplicated events. Recreate it
+    # as a unique index so it exists on BOTH backends and a future re-migration can't
+    # lose it again. Own transaction + guarded: on a not-yet-deduped DB it fails over
+    # existing duplicates, so run repair_duplicate_events.py --apply first.
+    try:
+        conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_pl_raw_event
+                        ON pl_raw_events(account_id, order_id, order_item_id, event_type, posted_date)""")
+        conn.commit()
+    except Exception as _e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.warning("uq_pl_raw_event not created — pl_raw_events still has duplicates? "
+                    "Run repair_duplicate_events.py --apply, then reboot. (%s)", _e)
+    # module2_breakeven: per-canonical push-mode flag (deliberate below-break-even
+    # rank-buying). Created on BOTH backends (plain conn.execute, not the SQLite-only
+    # CREATE TABLE path) so it exists on Railway too.
+    conn.execute("""CREATE TABLE IF NOT EXISTS pl_push_asins (
+        account_id    TEXT NOT NULL,
+        canonical_sku TEXT NOT NULL,
+        created_at    TEXT,
+        PRIMARY KEY (account_id, canonical_sku))""")
+    conn.commit()
     conn.close()
     pl_cogs.init_cogs_schema(db_path=db_path)
     pl_postage.init_postage_schema(db_path=db_path)
@@ -1452,6 +1479,123 @@ def get_canonical_rollup(account_id=None, vat_treatment="ex_vat", db_path=DB_PAT
         r["asins"] = asin_map.get(canonical, []) if canonical else []
         out.append(_finish_rollup_row(r, vat_treatment))
     return out
+
+
+def get_total_units(account_id=None, start_date=None, end_date=None, db_path=DB_PATH):
+    """Total units across all ASINs in the period — the denominator for the per-unit
+    overhead split, so a single-SKU view allocates overhead the same way /pl does."""
+    conn = get_db(db_path)
+    where, params = _build_rollup_where(account_id, start_date, end_date)
+    row = conn.execute(f"SELECT SUM(quantity) AS u FROM pl_line_items {where}", params).fetchone()
+    conn.close()
+    return (row["u"] or 0) if row else 0
+
+
+def get_refunded_units_by_canonical(account_id=None, start_date=None, end_date=None, db_path=DB_PATH):
+    """{canonical_sku: refunded_units} — units on line items that have a matching
+    refund event. Drives the per-ASIN refund RATE in the break-even calc. Currently
+    sparse until the refund backfill lands (refunds live only in the per-order feed)."""
+    conn = get_db(db_path)
+    where, params = _build_rollup_where(account_id, start_date, end_date)
+    sql = f"""
+        SELECT canonical_sku, SUM(quantity) AS refunded_units
+        FROM pl_line_items li
+        {where} {'AND' if where else 'WHERE'} EXISTS (
+            SELECT 1 FROM pl_raw_events e
+            WHERE e.account_id=li.account_id AND e.order_id=li.order_id
+              AND e.order_item_id=li.order_item_id AND e.event_type='refund')
+        GROUP BY canonical_sku
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return {r["canonical_sku"]: (r["refunded_units"] or 0) for r in rows}
+
+
+# ── push-mode flag (per canonical SKU; deliberate below-break-even rank-buying) ──
+
+def get_push_canonicals(account_id=None, db_path=DB_PATH):
+    conn = get_db(db_path)
+    try:
+        if account_id and account_id != "all":
+            rows = conn.execute(
+                "SELECT canonical_sku FROM pl_push_asins WHERE account_id=?", (account_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT canonical_sku FROM pl_push_asins").fetchall()
+        return {r["canonical_sku"] for r in rows}
+    except Exception:
+        return set()
+    finally:
+        conn.close()
+
+
+def set_push_canonical(account_id, canonical_sku, on, db_path=DB_PATH):
+    conn = get_db(db_path)
+    if on:
+        conn.execute(
+            "INSERT INTO pl_push_asins (account_id, canonical_sku, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(account_id, canonical_sku) DO NOTHING",
+            (account_id, canonical_sku, _now()))
+    else:
+        conn.execute("DELETE FROM pl_push_asins WHERE account_id=? AND canonical_sku=?",
+                     (account_id, canonical_sku))
+    conn.commit()
+    conn.close()
+
+
+# ── layered break-even + target price (calculated column, no writes to Amazon) ──
+
+def attach_breakeven(rows, overheads_total=0.0, refunded_units=None, push_set=None,
+                     target_margin=0.10, total_units=None):
+    """Annotate each canonical rollup row (in place) with a LAYERED break-even and a
+    target price, all shown INC-VAT so they're comparable to avg sell price and usable
+    as an Amazon price. Layers (per unit, ex-VAT, then ×VAT for display):
+      direct  = COGS + Amazon fees + shipping label + averaged refund cost
+                (refund cost = this ASIN's refund_rate × the direct cost sunk per unit)
+      +ads    = direct + ad-cost-per-unit (this ASIN's ad spend ÷ its units)
+      all-in  = +ads + per-unit overhead (monthly overheads ÷ TOTAL units across all
+                ASINs in the period — a simple equal-per-unit split)
+      target  = all-in ÷ (1 − target_margin)  → net margin on sale price (not markup)
+    push_set = canonical SKUs deliberately run below break-even (rank-buying) — flagged
+    as info, never red. Non-push rows below all-in break-even get below_breakeven=True.
+    LIVE by design: ad spend + volume move weekly, so all-in moves with them."""
+    refunded_units = refunded_units or {}
+    push_set = push_set or set()
+    # per-unit overhead is allocated over ALL units in the period. On the whole-rollup
+    # view that's the sum of the rows; on a single-SKU view the caller passes the
+    # account-wide total_units so the split matches the rollup exactly.
+    if total_units is None:
+        total_units = sum((r.get("units") or 0) for r in rows) or 0
+    overhead_pu_exvat = (overheads_total / total_units) if total_units else 0.0
+
+    for r in rows:
+        u = r.get("units") or 0
+        r["is_push"] = r.get("canonical_sku") in push_set
+        vat_mult = 1 + (r["vat_rate"] if r.get("vat_rate") is not None else 0.20)
+        if u <= 0:
+            for k in ("be_direct", "be_ads", "be_allin", "target_price", "overhead_pu"):
+                r[k] = None
+            r["refund_rate"] = None
+            r["below_breakeven"] = False
+            continue
+        cogs_pu = (r.get("cogs") or 0) / u
+        fees_pu = ((r.get("referral_fees") or 0) + (r.get("other_fees") or 0)) / u
+        label_pu = (r.get("postage") or 0) / u
+        rrate = (refunded_units.get(r.get("canonical_sku"), 0) / u) if u else 0.0
+        refund_pu = rrate * (cogs_pu + fees_pu + label_pu)
+        direct = cogs_pu + fees_pu + label_pu + refund_pu
+        ad_pu = (r.get("ad_spend") or 0) / u
+        with_ads = direct + ad_pu
+        allin = with_ads + overhead_pu_exvat
+        target = (allin / (1 - target_margin)) if (allin and target_margin < 1) else allin
+        r["refund_rate"] = round(rrate, 4)
+        r["overhead_pu"] = round(overhead_pu_exvat * vat_mult, 2)
+        r["be_direct"] = round(direct * vat_mult, 2)
+        r["be_ads"] = round(with_ads * vat_mult, 2)
+        r["be_allin"] = round(allin * vat_mult, 2)
+        r["target_price"] = round(target * vat_mult, 2)
+        asp_incvat = (r.get("gross_sales_incvat") or 0) / u
+        r["below_breakeven"] = (asp_incvat < r["be_allin"]) and not r["is_push"]
+    return rows
 
 
 def get_period_rollup(account_id=None, period="day", vat_treatment="ex_vat", db_path=DB_PATH,
