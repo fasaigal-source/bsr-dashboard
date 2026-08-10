@@ -206,6 +206,35 @@ def compute_overheads(account_id, start_date, end_date, db_path=DB_PATH):
             "oneoff": round(oneoff_total, 2), "days": (e - s).days + 1, "lines": lines}
 
 
+def overhead_rate_trailing(account_id=None, months=3, as_of=None, db_path=DB_PATH):
+    """STABLE overhead-to-revenue rate for pricing: total overheads ÷ total ex-VAT
+    revenue over the last `months` COMPLETE calendar months. The in-progress month is
+    deliberately EXCLUDED, so the rate can't spike at the start of a month (when few
+    orders have settled) or drift down as the month fills in — the break-even/target
+    price stays steady all month. Returns overhead £ per £1 of ex-VAT sales; the
+    break-even overhead layer is then rate × each SKU's ex-VAT price (still by-revenue).
+
+    Window (as_of defaults to today): first day of the month `months` back, through the
+    last day of last month inclusive. Falls back to 0.0 if there's no revenue to divide by
+    (e.g. a brand-new account with no settled history yet)."""
+    from datetime import timedelta
+    import pl_db
+    ref = as_of or date.today()
+    if isinstance(ref, datetime):
+        ref = ref.date()
+    first_this = ref.replace(day=1)
+    end_prev = first_this - timedelta(days=1)              # last day of previous month
+    y, m = first_this.year, first_this.month - months
+    while m <= 0:
+        m += 12
+        y -= 1
+    start_iso = date(y, m, 1).strftime("%Y-%m-01")
+    end_iso = end_prev.strftime("%Y-%m-%dT23:59:59Z")      # inclusive of the whole day
+    oh = (compute_overheads(account_id, start_iso, end_iso, db_path=db_path).get("total", 0.0) or 0.0)
+    rev = pl_db.get_total_revenue(account_id, start_date=start_iso, end_date=end_iso) or 0.0
+    return (oh / rev) if rev else 0.0
+
+
 def monthly_equiv(amount, frequency):
     """A weekly figure expressed as a monthly run-rate (× 52/12); monthly stays as-is."""
     amount = float(amount or 0)

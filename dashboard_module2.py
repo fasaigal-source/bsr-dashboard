@@ -298,8 +298,8 @@ PL_HTML = """
       <div class="title">Per-product rollup{% if account_filter != "all" %} — {{ account_filter }}{% endif %}</div>
       <div class="hint" style="margin:-4px 0 8px;">
         <b>Break-even &amp; target (inc-VAT, per unit):</b> Direct = COGS + Amazon fees + label + averaged refund cost ·
-        +Ads adds this ASIN's ad-cost/unit · All-in adds a per-unit overhead share (overhead allocated by revenue, so cheap SKUs carry less) ·
-        Target = All-in ÷ 0.90 (10% net margin). It's a <b>live</b> number — moves with ad spend and volume.
+        +Ads adds this ASIN's ad-cost/unit · All-in adds overhead = a <b>stable trailing-3-month</b> overhead rate (overhead ÷ revenue) × this SKU's price, so cheap SKUs carry less ·
+        Target = All-in ÷ 0.90 (10% net margin). Overhead is stabilised so the target <b>holds steady through the month</b>; it still moves if your costs or ad spend change.
         Non-push ASINs priced below All-in break-even show <span class="neg">red</span>;
         <span class="badge" style="background:#fbe7c6;color:#8a5906;">push</span> ASINs below break-even are shown as info, not an alarm.
         {% if breakeven_provisional %}<br><span style="color:#8a5906;">⚠ Provisional: no refund data captured for this range yet, so the refund layer is understated — not authoritative until the refund backfill lands. This note clears once refunds arrive.</span>{% endif %}
@@ -423,7 +423,7 @@ PL_HTML = """
         <th class="col-asp sortable" data-key="asp" onclick="plSortBy('asp',this)" title="Average selling price = gross sales inc-VAT ÷ units (per pack sold), over the selected date range.">Avg sell price (inc-VAT)<span class="arrow"></span></th>
         <th class="be-col" title="Direct break-even (inc-VAT, per unit): COGS + Amazon fees + shipping label + this ASIN's averaged refund cost (its refund rate × the direct cost sunk per unit).">Direct BE</th>
         <th class="be-col" title="+ Ad spend: Direct plus this ASIN's ad-cost-per-unit (its ad spend ÷ units / TACOS applied).">+Ads BE</th>
-        <th class="be-col" title="All-in break-even (inc-VAT): +Ads plus a per-unit overhead share — this ASIN's REVENUE share of period overheads ÷ its units, so cheap SKUs carry less overhead/unit than dear ones. LIVE: moves with ad spend and volume — that's correct, not a bug.">All-in BE</th>
+        <th class="be-col" title="All-in break-even (inc-VAT): +Ads plus overhead. Overhead = a STABLE trailing-3-complete-month rate (overhead ÷ revenue) × this SKU's ex-VAT price — so cheap SKUs carry less, and the number does NOT spike at the start of a month or drift as it fills in. Steady all month; only changes if your costs/ads change.">All-in BE</th>
         <th class="be-col" title="Target price = All-in break-even ÷ 0.90 → a 10% NET margin on the sale price (not markup). Inc-VAT: the price to set.">Target price</th>
         <th class="col-referral_fees">Referral fees</th>
         <th class="col-other_fees">Other fees</th>
@@ -1154,7 +1154,15 @@ def pl_page():
         _push_set = pl_db.get_push_canonicals(account_filter)
     except Exception:
         _push_set = set()
-    pl_db.attach_breakeven(canonical_rows, overheads_total=(overheads_period or 0.0),
+    # Overhead layer uses a STABLE trailing-3-complete-month rate (overhead ÷ revenue),
+    # NOT the in-progress period — so the target price can't spike early in the month or
+    # drift as it fills in. overheads_period above is unaffected (still the bottom-line).
+    try:
+        import pl_expenses as _plx_be
+        _oh_rate = _plx_be.overhead_rate_trailing(account_filter)
+    except Exception:
+        _oh_rate = 0.0
+    pl_db.attach_breakeven(canonical_rows, overhead_rate=_oh_rate,
                            refunded_units=_refunded_units, push_set=_push_set)
     # Not authoritative until the refund backfill lands: if no refund units are captured
     # yet, the refund layer is understated — surface a caveat that self-clears once refunds arrive.
@@ -2892,7 +2900,7 @@ SKU_DETAIL_HTML = """
           <table style="font-size:13px;border-collapse:collapse;">
             <tr><td style="padding:2px 16px 2px 0;">Direct break-even</td><td>£{{ "%.2f"|format(row.be_direct) }} <span class="muted" style="font-weight:400;">COGS + Amazon fees + label + refund</span></td></tr>
             <tr><td style="padding:2px 16px 2px 0;">+ Ad spend</td><td>£{{ "%.2f"|format(row.be_ads) }} <span class="muted" style="font-weight:400;">+ ad-cost per unit</span></td></tr>
-            <tr><td style="padding:2px 16px 2px 0;">All-in break-even</td><td class="{{ 'neg' if row.below_breakeven else '' }}">£{{ "%.2f"|format(row.be_allin) }} <span class="muted" style="font-weight:400;">+ overhead £{{ "%.2f"|format(row.overhead_pu or 0) }}/unit (allocated by revenue)</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;">All-in break-even</td><td class="{{ 'neg' if row.below_breakeven else '' }}">£{{ "%.2f"|format(row.be_allin) }} <span class="muted" style="font-weight:400;">+ overhead £{{ "%.2f"|format(row.overhead_pu or 0) }}/unit (stable trailing-3-mo rate × price)</span></td></tr>
             <tr><td style="padding:2px 16px 2px 0;"><b>Target price</b></td><td><b>£{{ "%.2f"|format(row.target_price) }}</b> <span class="muted" style="font-weight:400;">= all-in ÷ 0.90 (10% net margin)</span></td></tr>
           </table>
           {% else %}<span class="muted">no units sold in this range</span>{% endif %}
@@ -3115,17 +3123,16 @@ def pl_sku_detail(canonical_sku):
     row["product_type"] = identity["product_type"]
 
     # module2_breakeven: the same layered break-even /pl shows, for this one SKU.
-    # Overhead is allocated by ACCOUNT-WIDE revenue (not just this SKU) so it matches /pl.
+    # Overhead uses the ACCOUNT-WIDE stable trailing-3-month rate (range-independent), so
+    # this page and /pl agree and neither swings with the calendar month.
     _acct_be = row.get("account_id") or account_filter
     try:
         import pl_expenses as _plx
-        _oh_range = pl_db.resolve_pl_date_range(_acct_be, start_date=start_date)
-        _oh_total = _plx.compute_overheads(_acct_be, _oh_range[0], _oh_range[1]).get("total", 0.0) if _oh_range[0] else 0.0
+        _oh_rate = _plx.overhead_rate_trailing(_acct_be)
         pl_db.attach_breakeven(
-            [row], overheads_total=_oh_total,
+            [row], overhead_rate=_oh_rate,
             refunded_units=pl_db.get_refunded_units_by_canonical(_acct_be, start_date=start_date),
-            push_set=pl_db.get_push_canonicals(_acct_be),
-            total_revenue=pl_db.get_total_revenue(_acct_be, start_date))
+            push_set=pl_db.get_push_canonicals(_acct_be))
         breakeven_provisional = (pl_db.get_total_units(_acct_be, start_date) or 0) and \
             not sum(pl_db.get_refunded_units_by_canonical(_acct_be, start_date=start_date).values())
     except Exception:

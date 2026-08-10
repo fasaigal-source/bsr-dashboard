@@ -1555,30 +1555,26 @@ def set_push_canonical(account_id, canonical_sku, on, db_path=DB_PATH):
 
 # ── layered break-even + target price (calculated column, no writes to Amazon) ──
 
-def attach_breakeven(rows, overheads_total=0.0, refunded_units=None, push_set=None,
-                     target_margin=0.10, total_revenue=None):
+def attach_breakeven(rows, overhead_rate=0.0, refunded_units=None, push_set=None,
+                     target_margin=0.10):
     """Annotate each canonical rollup row (in place) with a LAYERED break-even and a
     target price, all shown INC-VAT so they're comparable to avg sell price and usable
     as an Amazon price. Layers (per unit, ex-VAT, then ×VAT for display):
       direct  = COGS + Amazon fees + shipping label + averaged refund cost
                 (refund cost = this ASIN's refund_rate × the direct cost sunk per unit)
       +ads    = direct + ad-cost-per-unit (this ASIN's ad spend ÷ its units)
-      all-in  = +ads + per-unit overhead (this ASIN's REVENUE share of period overheads,
-                divided by its units — so cheap SKUs carry less overhead/unit than dear
-                ones. Full overhead is still allocated; it's just weighted by sales £.)
+      all-in  = +ads + per-unit overhead = overhead_rate × this SKU's ex-VAT price.
+                overhead_rate is a STABLE overhead-£-per-£-of-revenue figure derived from
+                a fixed trailing baseline (see pl_expenses.overhead_rate_trailing) — NOT
+                the in-progress period — so the target doesn't spike at the start of a
+                month or drift as it fills in. Still by-revenue: a £60 SKU carries 6× the
+                overhead/unit of a £10 one, because it's a % of that SKU's price.
       target  = all-in ÷ (1 − target_margin)  → net margin on sale price (not markup)
     push_set = canonical SKUs deliberately run below break-even (rank-buying) — flagged
     as info, never red. Non-push rows below all-in break-even get below_breakeven=True.
-    LIVE by design: ad spend + volume move weekly, so all-in moves with them."""
+    Only the overhead layer is stabilised; direct/ads still reflect the viewed window."""
     refunded_units = refunded_units or {}
     push_set = push_set or set()
-    # overhead is allocated BY REVENUE: each SKU's share = overheads × (its rev / total
-    # rev), then ÷ its units. So a £12 SKU carries far less overhead/unit than a £60 one,
-    # and the full overhead is still allocated (shares sum to 1). total_revenue is the
-    # period's ex-VAT revenue; on the whole-rollup view it's the sum of the rows, on a
-    # single-SKU view the caller passes the account-wide total so the split matches /pl.
-    if total_revenue is None:
-        total_revenue = sum((r.get("gross_sales_exvat") or 0) for r in rows) or 0.0
 
     for r in rows:
         u = r.get("units") or 0
@@ -1598,8 +1594,8 @@ def attach_breakeven(rows, overheads_total=0.0, refunded_units=None, push_set=No
         direct = cogs_pu + fees_pu + label_pu + refund_pu
         ad_pu = (r.get("ad_spend") or 0) / u
         with_ads = direct + ad_pu
-        rev_row = r.get("gross_sales_exvat") or 0
-        overhead_pu_exvat = (overheads_total * (rev_row / total_revenue) / u) if (total_revenue and u) else 0.0
+        asp_exvat = (r.get("gross_sales_exvat") or 0) / u
+        overhead_pu_exvat = overhead_rate * asp_exvat   # stable rate × this SKU's ex-VAT price
         allin = with_ads + overhead_pu_exvat
         target = (allin / (1 - target_margin)) if (allin and target_margin < 1) else allin
         r["refund_rate"] = round(rrate, 4)
