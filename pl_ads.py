@@ -502,14 +502,16 @@ def get_ad_spend_by_asin(account_id=None, start_date=None, end_date=None, db_pat
     rows = conn.execute(f"""
         SELECT asin, SUM(spend) AS spend, SUM(ad_sales) AS ad_sales,
                SUM(clicks) AS clicks, SUM(orders) AS orders,
-               SUM(sales_promoted) AS sales_promoted, SUM(sales_halo) AS sales_halo
+               SUM(sales_promoted) AS sales_promoted, SUM(sales_halo) AS sales_halo,
+               MAX(parent_asin) AS parent_asin
         FROM ad_spend {where}
         GROUP BY asin
     """, params).fetchall()
     conn.close()
     return {r["asin"]: dict(spend=r["spend"] or 0.0, ad_sales=r["ad_sales"] or 0.0,
                              clicks=r["clicks"] or 0, orders=r["orders"] or 0,
-                             sales_promoted=r["sales_promoted"] or 0.0, sales_halo=r["sales_halo"] or 0.0)
+                             sales_promoted=r["sales_promoted"] or 0.0, sales_halo=r["sales_halo"] or 0.0,
+                             parent_asin=r["parent_asin"])
             for r in rows}
 
 
@@ -630,6 +632,82 @@ def get_ad_spend_period_series(account_id=None, period="day", start_date=None, e
     return {r["period"]: (r["spend"] or 0.0) for r in rows}
 
 
+def redistribute_ad_spend(rows, ad_map):
+    """HALO-AWARE ad-spend allocation across variation families.
+
+    For each advertised ASIN A (spend S, promoted own-sales P, halo sibling-sales H):
+      · the PROMOTED share  S·P/(P+H)  stays on A's own rollup row (cost for the
+        sales A made itself);
+      · the HALO share  S·H/(P+H)  is spread across the OTHER rows in A's variation
+        family (same parent_asin) by each sibling's sales share — those are the sales
+        the spend actually produced, so they should carry the cost.
+    Spend is never lost; total is conserved. Fallbacks:
+      · P+H == 0 (ad drove no attributed sales)          -> all S stays on A.
+      · no identifiable family / no siblings with sales   -> halo stays on A.
+      · A has no rollup row (no orders in range at all)   -> that portion is an orphan.
+
+    Family membership is only known for ADVERTISED ASINs (ad_spend.parent_asin); a
+    never-advertised sibling can't be identified, so its share of halo can't reach it and
+    stays on the advertiser (documented limitation — a listings/variation import would
+    close it). Returns (alloc, orphans):
+      alloc   = {row_index: {spend, own, halo_in, halo_out, ad_sales,
+                             ad_sales_promoted, ad_sales_halo, clicks, orders}}
+      orphans = [{asin, spend}]  aggregated portions with no home row."""
+    asin_row = {}
+    for i, r in enumerate(rows):
+        for a in (r.get("asins") or []):
+            asin_row[a] = i
+    # family[parent] = row indices that contain an advertised asin of that parent
+    family = {}
+    for a, e in ad_map.items():
+        par = e.get("parent_asin")
+        ri = asin_row.get(a)
+        if par and ri is not None:
+            family.setdefault(par, set()).add(ri)
+
+    alloc = {i: {"spend": 0.0, "own": 0.0, "halo_in": 0.0, "halo_out": 0.0,
+                 "ad_sales": 0.0, "ad_sales_promoted": 0.0, "ad_sales_halo": 0.0,
+                 "clicks": 0, "orders": 0} for i in range(len(rows))}
+    orphans = []
+
+    def _sales(i):
+        return rows[i].get("gross_sales_exvat") or 0.0
+
+    for a, e in ad_map.items():
+        S = e.get("spend") or 0.0
+        P = e.get("sales_promoted") or 0.0
+        H = e.get("sales_halo") or 0.0
+        owner = asin_row.get(a)
+        attributed = P + H
+        halo_spend = (S * H / attributed) if attributed > 0 else 0.0
+        own_spend = S - halo_spend
+        if owner is not None:
+            alloc[owner]["own"] += own_spend
+            alloc[owner]["ad_sales"] += e.get("ad_sales") or 0.0
+            alloc[owner]["ad_sales_promoted"] += P
+            alloc[owner]["ad_sales_halo"] += H
+            alloc[owner]["clicks"] += e.get("clicks") or 0
+            alloc[owner]["orders"] += e.get("orders") or 0
+        else:
+            orphans.append({"asin": a, "spend": own_spend})
+        if halo_spend > 0:
+            members = [i for i in family.get(e.get("parent_asin"), set()) if i != owner]
+            sib_total = sum(_sales(i) for i in members)
+            if members and sib_total > 0:
+                for i in members:
+                    alloc[i]["halo_in"] += halo_spend * (_sales(i) / sib_total)
+                if owner is not None:
+                    alloc[owner]["halo_out"] += halo_spend
+            elif owner is not None:                 # nowhere to send it -> keep on A
+                alloc[owner]["own"] += halo_spend
+            else:
+                orphans.append({"asin": a, "spend": halo_spend})
+
+    for i in range(len(rows)):
+        alloc[i]["spend"] = alloc[i]["own"] + alloc[i]["halo_in"]
+    return alloc, orphans
+
+
 def attach_ad_spend_to_rollup(rows, account_id=None, start_date=None, end_date=None, db_path=DB_PATH):
     """Enriches an already-built canonical/ASIN rollup (each row must
     already carry an `asins` list -- see pl_db.get_canonical_rollup) with:
@@ -655,30 +733,23 @@ def attach_ad_spend_to_rollup(rows, account_id=None, start_date=None, end_date=N
     Rows are mutated in place AND returned, for caller convenience."""
     ad_map = get_ad_spend_by_asin(account_id=account_id, start_date=start_date,
                                     end_date=end_date, db_path=db_path)
-    covered_asins = set()
-    for r in rows:
-        asins = r.get("asins") or []
-        spend = ad_sales = 0.0
-        clicks = orders = 0
-        ad_sales_promoted = ad_sales_halo = 0.0
-        for a in asins:
-            e = ad_map.get(a)
-            if not e:
-                continue
-            covered_asins.add(a)
-            spend += e["spend"]
-            ad_sales += e["ad_sales"]
-            clicks += e["clicks"]
-            orders += e["orders"]
-            # module2_ads_halo: own (promoted) vs sibling (halo) attributed sales
-            ad_sales_promoted += e.get("sales_promoted", 0.0)
-            ad_sales_halo += e.get("sales_halo", 0.0)
+    # module2_ads_halo_split: allocate spend HALO-AWARE — the promoted share stays on the
+    # advertised ASIN, the halo share spreads across its variation family by sales (see
+    # redistribute_ad_spend), so an advertised child no longer eats cost for sales its
+    # siblings made. Total spend is conserved; unplaceable spend falls out as orphans.
+    alloc, orphan_parts = redistribute_ad_spend(rows, ad_map)
+    for i, r in enumerate(rows):
+        al = alloc[i]
+        spend = al["spend"]
         r["ad_spend"] = spend
-        r["ad_sales"] = ad_sales
-        r["ad_sales_promoted"] = ad_sales_promoted
-        r["ad_sales_halo"] = ad_sales_halo
-        r["ad_clicks"] = clicks
-        r["ad_orders"] = orders
+        r["ad_spend_own"] = al["own"]            # cost for this row's OWN advertised sales
+        r["ad_spend_halo_in"] = al["halo_in"]    # halo cost received from advertised siblings
+        r["ad_spend_halo_out"] = al["halo_out"]  # halo cost sent to siblings (off this row)
+        r["ad_sales"] = al["ad_sales"]
+        r["ad_sales_promoted"] = al["ad_sales_promoted"]
+        r["ad_sales_halo"] = al["ad_sales_halo"]
+        r["ad_clicks"] = al["clicks"]
+        r["ad_orders"] = al["orders"]
         base_profit = r.get("net_profit") or 0
         r["net_profit_after_ads"] = base_profit - spend
         gross = r.get("gross_sales_exvat") or 0
@@ -700,10 +771,15 @@ def attach_ad_spend_to_rollup(rows, account_id=None, start_date=None, end_date=N
         # expected; the UI labels it as such (search "two clocks").
         r["tacos"] = (spend / gross) if gross else None
 
+    # orphans = advertised spend that couldn't land on any row (no matching orders in
+    # range, and — for halo — no identifiable sibling with sales). Aggregate the parts.
+    orphan_by_asin = {}
+    for o in orphan_parts:
+        orphan_by_asin[o["asin"]] = orphan_by_asin.get(o["asin"], 0.0) + o["spend"]
     orphans = []
-    for asin, e in ad_map.items():
-        if asin in covered_asins:
-            continue
+    for asin, sp in orphan_by_asin.items():
+        e = dict(ad_map.get(asin, {}))
+        e["spend"] = sp
         orphans.append(dict(asin=asin, **e))
     orphans.sort(key=lambda o: -o["spend"])
     return rows, orphans
