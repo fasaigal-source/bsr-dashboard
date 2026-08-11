@@ -275,10 +275,12 @@ PL_HTML = """
         <span style="font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">= Net profit (before ads)</span><span id="sumNetBefore" style="text-align:right;font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">£0.00</span>
         <span>− Ad spend</span><span id="sumAdspend" style="text-align:right;">−£0.00</span>
         <span style="font-weight:600;">= Net profit (after ads)</span><span id="sumNetAfterEcho" style="text-align:right;font-weight:600;">£0.00</span>
-        <span>− Overheads (period) <a href="/pl/expenses" style="font-weight:400;">edit</a></span><span id="sumOverheads" style="text-align:right;">−£0.00</span>
-        <span style="font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">= Net profit after overheads</span><span id="sumNetAfterOh" style="text-align:right;font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">£0.00</span>
+        <span id="sumOverheadsLabel">− Overheads (period) <a href="/pl/expenses" style="font-weight:400;">edit</a></span><span id="sumOverheads" style="text-align:right;">−£0.00</span>
+        <span id="sumNetAfterOhLabel" style="font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">= Net profit after overheads</span><span id="sumNetAfterOh" style="text-align:right;font-weight:700;border-top:1px solid #eef1f4;padding-top:4px;">£0.00</span>
       </div>
-      <div class="hint" style="margin-top:8px;">Overheads are the <b>whole-business</b> total for {{ range_start }} → {{ range_end }} (monthly items pro-rated by days), from the <a href="/pl/expenses">Expenses</a> page — kept out of per-order COGS and never split per product. They don't scale with the row filters above, so <b>“after overheads” is the true bottom line only at the unfiltered view</b>.</div>
+      <div id="sumFilteredBanner" class="hint" style="display:none;margin-top:8px;padding:6px 10px;background:#fbf3e0;border:1px solid #f0dcae;border-radius:6px;color:#8a5906;">
+        Showing a <b>filtered subset</b> — overheads apply <b>whole-business only</b>, so the “after overheads” bottom line is hidden here. The <b>after-ads</b> figure above is the subset's real contribution. Clear filters to see the whole-business bottom line.</div>
+      <div id="sumOverheadsHint" class="hint" style="margin-top:8px;">Overheads are the <b>whole-business</b> total for {{ range_start }} → {{ range_end }} (monthly items pro-rated by days), from the <a href="/pl/expenses">Expenses</a> page — kept out of per-order COGS and never split per product. They don't scale with the row filters above, so <b>“after overheads” is the true bottom line only at the unfiltered view</b>.</div>
     </details>
     <script>window.PL_OVERHEADS = {{ '%.4f'|format(overheads_period or 0) }};</script>
     <div id="plSummaryProvisional" class="hint" style="margin-top:10px;color:#8a5906;display:none;"></div>
@@ -453,7 +455,7 @@ PL_HTML = """
         <th class="col-postage sortable" data-key="postage" onclick="plSortBy('postage',this)">Postage<span class="arrow"></span></th>
         <th class="col-netprofit sortable" data-key="netprofit" onclick="plSortBy('netprofit',this)">Net profit<span class="arrow"></span></th>
         <th class="col-margin sortable" data-key="margin" onclick="plSortBy('margin',this)">Margin<span class="arrow"></span></th>
-        <th class="col-ad_spend sortable" data-key="adspend" onclick="plSortBy('adspend',this)">Ad spend<span class="arrow"></span></th>
+        <th class="col-ad_spend sortable" data-key="adspend" onclick="plSortBy('adspend',this)" title="Halo-aware: each advertised ASIN keeps the spend for its OWN (promoted) sales, and the spend that drove HALO sales (sibling variations) is spread across the family by sales — so an advertised child no longer eats cost for sales its siblings made, and a never-advertised sibling can now carry ad cost it earned. Family + account totals unchanged.">Ad spend<span class="arrow"></span></th>
         <th class="col-ad_promoted sortable" data-key="adpromoted" onclick="plSortBy('adpromoted',this)">Ad sales (own)<span class="arrow"></span></th>
         <th class="col-ad_halo sortable" data-key="adhalo" onclick="plSortBy('adhalo',this)">Ad sales (halo)<span class="arrow"></span></th>
         <th class="col-after_ads sortable" data-key="afterads" onclick="plSortBy('afterads',this)">Net profit (after ads)<span class="arrow"></span></th>
@@ -907,11 +909,22 @@ PL_HTML = """
       plSetCost("sumRef", ref); plSetCost("sumOther", oth); plSetCost("sumPromo", promo);
       plSetCost("sumCogs", cogs); plSetCost("sumPostage", post); plSetCost("sumAdspend", ad);
       plSetNet("sumNetBefore", netB); plSetNet("sumNetAfter", netA); plSetNet("sumNetAfterEcho", netA);
-      // Overheads: a business-wide, period figure (not row-scaled) — subtract from
-      // net-after-ads for the true bottom line.
+      // Overheads are a WHOLE-BUSINESS period figure that doesn't scale with row
+      // filters. When a filter is active, subtracting the full overhead from the
+      // filtered subset's profit is meaningless (a false red), so HIDE the overhead +
+      // after-overheads lines and show a banner instead — the true bottom line is only
+      // shown at the unfiltered whole-business view. The after-ads line always stays.
       var oh = (window.PL_OVERHEADS || 0);
+      var filtered = vis.length < total;
+      function plShow(id, on){ var e = document.getElementById(id); if (e) e.style.display = on ? "" : "none"; }
       plSetCost("sumOverheads", oh);
       plSetNet("sumNetAfterOh", netA - oh);
+      plShow("sumOverheadsLabel", !filtered);
+      plShow("sumOverheads", !filtered);
+      plShow("sumNetAfterOhLabel", !filtered);
+      plShow("sumNetAfterOh", !filtered);
+      plShow("sumOverheadsHint", !filtered);
+      plShow("sumFilteredBanner", filtered);
       plS("sumOrders", orders); plS("sumUnits", units);
       plS("sumMargin", g ? (100*netA/g).toFixed(1) + "%" : "—");
       plS("sumAsp", units ? "£" + (g/units).toFixed(2) : "—");
