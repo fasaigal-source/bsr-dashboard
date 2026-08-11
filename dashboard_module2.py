@@ -298,12 +298,32 @@ PL_HTML = """
       <div class="title">Per-product rollup{% if account_filter != "all" %} — {{ account_filter }}{% endif %}</div>
       <div class="hint" style="margin:-4px 0 8px;">
         <b>Break-even &amp; target (inc-VAT, per unit):</b> Direct = COGS + Amazon fees + label + averaged refund cost ·
-        +Ads adds this ASIN's ad-cost/unit · All-in adds overhead = a <b>stable trailing-3-month</b> overhead rate (overhead ÷ revenue) × this SKU's price, so cheap SKUs carry less ·
-        Target = All-in ÷ 0.90 (10% net margin). Overhead is stabilised so the target <b>holds steady through the month</b>; it still moves if your costs or ad spend change.
-        Non-push ASINs priced below All-in break-even show <span class="neg">red</span>;
-        <span class="badge" style="background:#fbe7c6;color:#8a5906;">push</span> ASINs below break-even are shown as info, not an alarm.
-        {% if breakeven_provisional %}<br><span style="color:#8a5906;">⚠ Provisional: no refund data captured for this range yet, so the refund layer is understated — not authoritative until the refund backfill lands. This note clears once refunds arrive.</span>{% endif %}
+        +Ads adds this ASIN's ad-cost/unit · <b>Target = +Ads ÷ 0.90</b> — a <b>contribution</b> price that covers variable cost plus a 10% margin, so every sale contributes to overhead ·
+        All-in BE = full-cost <i>reference</i> (variable + a stable trailing-3-month overhead share); overhead is <b>not</b> baked into the target — it's covered at the business level (see below).
+        Non-push ASINs priced below <b>+Ads</b> break-even (a real per-unit loss) show <span class="neg">red</span>;
+        <span class="badge" style="background:#fbe7c6;color:#8a5906;">push</span> ASINs below it are shown as info, not an alarm.
       </div>
+      {% if overhead_goal and overhead_goal.overhead_monthly %}
+      <div class="hint" style="margin:-2px 0 10px;padding:8px 10px;background:#f4f7fb;border:1px solid #dbe4f0;border-radius:6px;">
+        <b>Overhead-coverage goal:</b> overhead runs <b>£{{ "%.0f"|format(overhead_goal.overhead_monthly) }}/month</b>
+        ({{ "%.0f"|format(overhead_goal.rate_pct) }}% of sales, mostly warehouse rent) — this is covered by total
+        contribution, not per SKU.
+        {% if overhead_goal.required_monthly_rev %}
+          At your current contribution margin of <b>{{ "%.0f"|format(overhead_goal.contrib_pct) }}%</b> of sales you need
+          about <b>£{{ "%.0f"|format(overhead_goal.required_monthly_rev) }}/month</b> in sales to cover it; you're running
+          ~£{{ "%.0f"|format(overhead_goal.revenue_monthly) }}/month
+          {% if overhead_goal.covered %}
+            — <span class="pos">covered, +£{{ "%.0f"|format(overhead_goal.gap_monthly) }}/mo after overhead</span>.
+          {% else %}
+            — <span class="neg">short by £{{ "%.0f"|format(-overhead_goal.gap_monthly) }}/mo</span>: grow volume or trim overhead to close the gap.
+          {% endif %}
+        {% else %}
+          — but the catalogue isn't currently covering its <i>variable</i> costs (contribution ≤ 0), so overhead can't be
+          covered until per-unit economics (mainly ad spend) turn positive.
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if breakeven_provisional %}<div class="hint" style="margin:-2px 0 8px;"><span style="color:#8a5906;">⚠ Provisional: no refund data captured for this range yet, so the refund layer is understated — not authoritative until the refund backfill lands. This note clears once refunds arrive.</span></div>{% endif %}
       <div class="col-picker">
         <button type="button" class="btn btn-sm" onclick="document.getElementById('colPickerPanel').style.display = document.getElementById('colPickerPanel').style.display==='block' ? 'none' : 'block'">⚙ Columns</button>
         <div class="col-picker-panel" id="colPickerPanel">
@@ -423,8 +443,8 @@ PL_HTML = """
         <th class="col-asp sortable" data-key="asp" onclick="plSortBy('asp',this)" title="Average selling price = gross sales inc-VAT ÷ units (per pack sold), over the selected date range.">Avg sell price (inc-VAT)<span class="arrow"></span></th>
         <th class="be-col" title="Direct break-even (inc-VAT, per unit): COGS + Amazon fees + shipping label + this ASIN's averaged refund cost (its refund rate × the direct cost sunk per unit).">Direct BE</th>
         <th class="be-col" title="+ Ad spend: Direct plus this ASIN's ad-cost-per-unit (its ad spend ÷ units / TACOS applied).">+Ads BE</th>
-        <th class="be-col" title="All-in break-even (inc-VAT): +Ads plus overhead. Overhead = a STABLE trailing-3-complete-month rate (overhead ÷ revenue) × this SKU's ex-VAT price — so cheap SKUs carry less, and the number does NOT spike at the start of a month or drift as it fills in. Steady all month; only changes if your costs/ads change.">All-in BE</th>
-        <th class="be-col" title="Target price = All-in break-even ÷ 0.90 → a 10% NET margin on the sale price (not markup). Inc-VAT: the price to set.">Target price</th>
+        <th class="be-col" title="All-in break-even (inc-VAT) — full-cost REFERENCE only: +Ads plus a stable trailing-3-month overhead share. Shown so you can see total cost, but it is NOT what the target is based on: baking full overhead into every SKU at current volume gives unsellable prices. Overhead is covered at the business level (see the overhead-coverage goal above the table).">All-in BE</th>
+        <th class="be-col" title="Target price = +Ads break-even ÷ 0.90 → a CONTRIBUTION price (inc-VAT): covers this SKU's variable cost (COGS+fees+label+refund+ads) plus a 10% margin, so every sale contributes to overhead. Overhead itself is a business-level goal, not a per-unit tax — that's why this is achievable where full-absorption wasn't.">Target price</th>
         <th class="col-referral_fees">Referral fees</th>
         <th class="col-other_fees">Other fees</th>
         <th class="col-promotions">Promotions</th>
@@ -1154,16 +1174,38 @@ def pl_page():
         _push_set = pl_db.get_push_canonicals(account_filter)
     except Exception:
         _push_set = set()
-    # Overhead layer uses a STABLE trailing-3-complete-month rate (overhead ÷ revenue),
-    # NOT the in-progress period — so the target price can't spike early in the month or
-    # drift as it fills in. overheads_period above is unaffected (still the bottom-line).
+    # Overhead layer uses a STABLE trailing-3-complete-month baseline (overhead ÷ revenue),
+    # NOT the in-progress period. The per-unit target is CONTRIBUTION-based (variable cost +
+    # margin); overhead is covered at the business level via overhead_goal below.
     try:
         import pl_expenses as _plx_be
-        _oh_rate = _plx_be.overhead_rate_trailing(account_filter)
+        _oh_base = _plx_be.overhead_baseline_trailing(account_filter)
     except Exception:
-        _oh_rate = 0.0
-    pl_db.attach_breakeven(canonical_rows, overhead_rate=_oh_rate,
+        _oh_base = {"overhead_monthly": 0.0, "revenue_monthly": 0.0, "rate": 0.0,
+                    "overhead_total": 0.0, "revenue_total": 0.0, "months": 3,
+                    "start": None, "end": None}
+    pl_db.attach_breakeven(canonical_rows, overhead_rate=_oh_base.get("rate", 0.0),
                            refunded_units=_refunded_units, push_set=_push_set)
+    # Business-level overhead-coverage GOAL. Contribution margin = net-after-ads ÷ sales
+    # from the viewed rollup (stable per-unit economics); monthly overhead & sales from
+    # the stable trailing baseline. Answers "how much must we sell to cover overhead?"
+    _contrib = sum((r.get("net_profit_after_ads") or 0) for r in canonical_rows)
+    _rev_ex = sum((r.get("gross_sales_exvat") or 0) for r in canonical_rows)
+    _cratio = (_contrib / _rev_ex) if _rev_ex else 0.0
+    _oh_month = _oh_base.get("overhead_monthly", 0.0)
+    _rev_month = _oh_base.get("revenue_monthly", 0.0)
+    _contrib_month = _cratio * _rev_month
+    overhead_goal = {
+        "overhead_monthly": _oh_month,
+        "revenue_monthly": _rev_month,
+        "rate_pct": _oh_base.get("rate", 0.0) * 100,
+        "contrib_pct": _cratio * 100,
+        "contrib_monthly": _contrib_month,
+        "required_monthly_rev": (_oh_month / _cratio) if _cratio > 0 else None,
+        "covered": (_contrib_month >= _oh_month) if _cratio > 0 else False,
+        "gap_monthly": _contrib_month - _oh_month,
+        "months": _oh_base.get("months", 3),
+    }
     # Not authoritative until the refund backfill lands: if no refund units are captured
     # yet, the refund layer is understated — surface a caveat that self-clears once refunds arrive.
     breakeven_provisional = (sum(_refunded_units.values()) == 0)
@@ -1359,6 +1401,7 @@ def pl_page():
         postage_week_count=postage_week_count,
         unpriced_total=unpriced_total, overhead_monthly=overhead_monthly,
         overheads_period=overheads_period, breakeven_provisional=breakeven_provisional,
+        overhead_goal=overhead_goal,
         range_key=range_key, range_start=range_start, range_end=range_end,
         last_synced=last_synced, last_synced_iso=last_synced_iso,
         ad_orphans=ad_orphans, ad_coverage_warning=ad_coverage_warning,
@@ -2899,9 +2942,9 @@ SKU_DETAIL_HTML = """
           {% if row.be_allin is not none %}
           <table style="font-size:13px;border-collapse:collapse;">
             <tr><td style="padding:2px 16px 2px 0;">Direct break-even</td><td>£{{ "%.2f"|format(row.be_direct) }} <span class="muted" style="font-weight:400;">COGS + Amazon fees + label + refund</span></td></tr>
-            <tr><td style="padding:2px 16px 2px 0;">+ Ad spend</td><td>£{{ "%.2f"|format(row.be_ads) }} <span class="muted" style="font-weight:400;">+ ad-cost per unit</span></td></tr>
-            <tr><td style="padding:2px 16px 2px 0;">All-in break-even</td><td class="{{ 'neg' if row.below_breakeven else '' }}">£{{ "%.2f"|format(row.be_allin) }} <span class="muted" style="font-weight:400;">+ overhead £{{ "%.2f"|format(row.overhead_pu or 0) }}/unit (stable trailing-3-mo rate × price)</span></td></tr>
-            <tr><td style="padding:2px 16px 2px 0;"><b>Target price</b></td><td><b>£{{ "%.2f"|format(row.target_price) }}</b> <span class="muted" style="font-weight:400;">= all-in ÷ 0.90 (10% net margin)</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;">+ Ad spend (variable BE)</td><td class="{{ 'neg' if row.below_breakeven else '' }}">£{{ "%.2f"|format(row.be_ads) }} <span class="muted" style="font-weight:400;">+ ad-cost per unit — priced below this is a real per-unit loss</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;"><b>Target price</b></td><td><b>£{{ "%.2f"|format(row.target_price) }}</b> <span class="muted" style="font-weight:400;">= +Ads ÷ 0.90 — contribution price (variable + 10% margin)</span></td></tr>
+            <tr><td style="padding:2px 16px 2px 0;">All-in (reference)</td><td class="muted" style="font-weight:400;">£{{ "%.2f"|format(row.be_allin) }} — full cost incl. £{{ "%.2f"|format(row.overhead_pu or 0) }}/unit overhead; overhead is covered at the business level, not in the target</td></tr>
           </table>
           {% else %}<span class="muted">no units sold in this range</span>{% endif %}
         </div>

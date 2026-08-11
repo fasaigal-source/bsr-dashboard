@@ -1564,15 +1564,17 @@ def attach_breakeven(rows, overhead_rate=0.0, refunded_units=None, push_set=None
                 (refund cost = this ASIN's refund_rate × the direct cost sunk per unit)
       +ads    = direct + ad-cost-per-unit (this ASIN's ad spend ÷ its units)
       all-in  = +ads + per-unit overhead = overhead_rate × this SKU's ex-VAT price.
-                overhead_rate is a STABLE overhead-£-per-£-of-revenue figure derived from
-                a fixed trailing baseline (see pl_expenses.overhead_rate_trailing) — NOT
-                the in-progress period — so the target doesn't spike at the start of a
-                month or drift as it fills in. Still by-revenue: a £60 SKU carries 6× the
-                overhead/unit of a £10 one, because it's a % of that SKU's price.
-      target  = all-in ÷ (1 − target_margin)  → net margin on sale price (not markup)
+                REFERENCE ONLY (full-absorption): overhead_rate is a stable overhead-£-
+                per-£-of-revenue figure from a fixed trailing baseline. Shown so you can
+                see full cost, but it is NOT what the headline target is based on.
+      target  = +ads ÷ (1 − target_margin)  → CONTRIBUTION price: covers variable cost
+                (COGS+fees+label+refund+ads) plus the margin, and lets the sale contribute
+                to overhead. Overhead is NOT baked in per-unit — at current volume that
+                yields unsellable prices — it's covered at the business level instead
+                (see the overhead-coverage goal on /pl).
     push_set = canonical SKUs deliberately run below break-even (rank-buying) — flagged
-    as info, never red. Non-push rows below all-in break-even get below_breakeven=True.
-    Only the overhead layer is stabilised; direct/ads still reflect the viewed window."""
+    as info, never red. Non-push rows priced below the +Ads (variable) break-even — i.e.
+    not even covering COGS+fees+label+ads — get below_breakeven=True (a real loss)."""
     refunded_units = refunded_units or {}
     push_set = push_set or set()
 
@@ -1595,17 +1597,20 @@ def attach_breakeven(rows, overhead_rate=0.0, refunded_units=None, push_set=None
         ad_pu = (r.get("ad_spend") or 0) / u
         with_ads = direct + ad_pu
         asp_exvat = (r.get("gross_sales_exvat") or 0) / u
-        overhead_pu_exvat = overhead_rate * asp_exvat   # stable rate × this SKU's ex-VAT price
+        overhead_pu_exvat = overhead_rate * asp_exvat   # full-absorption REFERENCE only
         allin = with_ads + overhead_pu_exvat
-        target = (allin / (1 - target_margin)) if (allin and target_margin < 1) else allin
+        # CONTRIBUTION target: variable cost + margin. Overhead is handled at the
+        # business level (overhead-coverage goal), not baked into each unit.
+        target = (with_ads / (1 - target_margin)) if (with_ads and target_margin < 1) else with_ads
         r["refund_rate"] = round(rrate, 4)
         r["overhead_pu"] = round(overhead_pu_exvat * vat_mult, 2)
         r["be_direct"] = round(direct * vat_mult, 2)
         r["be_ads"] = round(with_ads * vat_mult, 2)
-        r["be_allin"] = round(allin * vat_mult, 2)
-        r["target_price"] = round(target * vat_mult, 2)
+        r["be_allin"] = round(allin * vat_mult, 2)          # full-absorption reference
+        r["target_price"] = round(target * vat_mult, 2)     # contribution-based
         asp_incvat = (r.get("gross_sales_incvat") or 0) / u
-        r["below_breakeven"] = (asp_incvat < r["be_allin"]) and not r["is_push"]
+        # red = priced below the +Ads (variable) break-even → a real per-unit loss
+        r["below_breakeven"] = (asp_incvat < r["be_ads"]) and not r["is_push"]
     return rows
 
 
