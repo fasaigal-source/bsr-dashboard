@@ -23,6 +23,7 @@
 !/dashboard_module3.py
 !/dashboard_expenses.py
 !/dashboard_channels.py
+!/dashboard_calculator.py
 
 # data layer + read-only collector mapping
 !/db.py
