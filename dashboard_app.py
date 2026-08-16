@@ -37,6 +37,8 @@ _NAV_ITEMS = [
     ("/pl/expenses", "Expenses"),
     ("__sep__", ""),
     ("/ppc", "PPC"),
+    ("__sep__", ""),
+    ("/calculator", "Scale-up calculator"),
 ]
 
 _NAV_STYLE = (

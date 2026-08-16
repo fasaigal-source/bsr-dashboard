@@ -21,6 +21,7 @@ import dashboard_module2   # noqa: F401 -- registers Module 2 routes on `app`
 import dashboard_module3   # noqa: F401 -- registers Module 3 (PPC) routes on `app`
 import dashboard_expenses  # noqa: F401 -- registers Expenses/Overheads routes on `app`
 import dashboard_channels  # noqa: F401 -- registers the multi-channel overview on `app`
+import dashboard_calculator # noqa: F401 -- registers the static Scale-up calculator on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
