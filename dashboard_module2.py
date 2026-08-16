@@ -1619,7 +1619,7 @@ COGS_HTML = """
         <td>{{ f.price_basis }}</td>
         <td>{{ f.n_canonical_skus }}</td>
         <td>{% if f.unit_price_exvat is not none %}£{{ "%.2f"|format(f.unit_price_exvat) }}{% else %}<span class="badge no">no price</span>{% endif %}</td>
-        <td>{{ (f.vat_rate * 100)|round|int }}%</td>
+        <td>{% if f.vat_rate is not none %}{{ (f.vat_rate * 100)|round|int }}%{% else %}<span class="badge no">—</span>{% endif %}</td>
         <td class="muted" style="font-size:11.5px;">{{ f.source }}</td>
         <td class="row-inline">
           <form method="POST" action="/pl/cogs/family/{{ f.family }}/price" class="row-inline">
