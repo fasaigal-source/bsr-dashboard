@@ -25,6 +25,25 @@ import db
 log = logging.getLogger(__name__)
 DB_PATH = "bsr_history.db"
 
+# Standard parcel-size presets (name -> length, width, height in cm). Picking one on the
+# ship screen fills the dims instantly instead of typing L/W/H every time.
+PARCEL_SIZES = [
+    ("Large Letter", 30, 20, 2),
+    ("Under 40L",     40, 30, 30),
+    ("Under 60L",     50, 40, 29),
+    ("Under 80L",     50, 40, 40),
+    ("Drop off",      60, 50, 40),
+]
+PARCEL_SIZE_MAP = {name: (l, w, h) for name, l, w, h in PARCEL_SIZES}
+
+
+def size_for_dims(length_cm, width_cm, height_cm):
+    """Reverse-lookup: which preset name matches these dims exactly (or None)."""
+    for name, l, w, h in PARCEL_SIZES:
+        if (length_cm, width_cm, height_cm) == (l, w, h):
+            return name
+    return None
+
 
 def get_db(db_path=DB_PATH):
     conn = db.connect(db_path)
@@ -35,6 +54,17 @@ def get_db(db_path=DB_PATH):
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _has_col(conn, table, col):
+    try:
+        if db.is_postgres():
+            r = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_name=? AND column_name=?",
+                             (table, col)).fetchone()
+            return bool(r)
+        return any(row[1] == col for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+    except Exception:
+        return True
 
 
 # ── schema ───────────────────────────────────────────────────────────────────
@@ -57,12 +87,36 @@ def init_labels_schema(db_path=DB_PATH):
             length_cm      {DIM},
             width_cm       {DIM},
             height_cm      {DIM},
+            parcel_size    TEXT,                    -- preset name (Large Letter, Under 40L, …)
             source         TEXT NOT NULL DEFAULT 'manual',   -- 'amazon_catalog' | 'manual'
             updated_at     TEXT NOT NULL,
             UNIQUE(account_id, canonical_sku)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pkgdef_acct ON sku_package_defaults(account_id)")
+    if not _has_col(conn, "sku_package_defaults", "parcel_size"):   # additive migration
+        conn.execute("ALTER TABLE sku_package_defaults ADD COLUMN parcel_size TEXT")
+
+    # cached ready-to-ship queue: one row per unshipped order, items as JSON. Refreshed on
+    # demand from the Orders API so the page loads instantly instead of re-fetching per view.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shipment_queue (
+            account_id     TEXT NOT NULL,
+            order_id       TEXT NOT NULL,
+            purchase_date  TEXT,
+            status         TEXT,
+            ship_by        TEXT,
+            deliver_by     TEXT,
+            service        TEXT,
+            prime          INTEGER DEFAULT 0,
+            total          TEXT,
+            currency       TEXT,
+            items_json     TEXT,
+            refreshed_at   TEXT,
+            PRIMARY KEY (account_id, order_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_shipq_acct ON shipment_queue(account_id)")
 
     conn.execute(f"""
         CREATE TABLE IF NOT EXISTS shipment_labels (
@@ -99,21 +153,75 @@ def init_labels_schema(db_path=DB_PATH):
 
 def upsert_package_default(account_id, canonical_sku, asin=None, weight_g=None,
                            length_cm=None, width_cm=None, height_cm=None,
-                           source="manual", db_path=DB_PATH):
-    """Insert or update the package default for (account, canonical). Idempotent —
-    re-running the backfill or re-saving from the settings page overwrites in place."""
+                           parcel_size=None, source="manual", db_path=DB_PATH):
+    """Insert or update the package default for (account, canonical). Idempotent.
+    If parcel_size is a known preset and dims are not given explicitly, the preset's
+    dims are used."""
+    if parcel_size and parcel_size in PARCEL_SIZE_MAP and length_cm is None \
+            and width_cm is None and height_cm is None:
+        length_cm, width_cm, height_cm = PARCEL_SIZE_MAP[parcel_size]
+    if parcel_size is None:
+        parcel_size = size_for_dims(length_cm, width_cm, height_cm)
     conn = get_db(db_path)
     conn.execute(
         "INSERT INTO sku_package_defaults "
-        "(account_id, canonical_sku, asin, weight_g, length_cm, width_cm, height_cm, source, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?) "
+        "(account_id, canonical_sku, asin, weight_g, length_cm, width_cm, height_cm, parcel_size, source, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(account_id, canonical_sku) DO UPDATE SET "
         "asin=excluded.asin, weight_g=excluded.weight_g, length_cm=excluded.length_cm, "
-        "width_cm=excluded.width_cm, height_cm=excluded.height_cm, source=excluded.source, "
-        "updated_at=excluded.updated_at",
-        (account_id, canonical_sku, asin, weight_g, length_cm, width_cm, height_cm, source, _now()))
+        "width_cm=excluded.width_cm, height_cm=excluded.height_cm, parcel_size=excluded.parcel_size, "
+        "source=excluded.source, updated_at=excluded.updated_at",
+        (account_id, canonical_sku, asin, weight_g, length_cm, width_cm, height_cm,
+         parcel_size, source, _now()))
     conn.commit()
     conn.close()
+
+
+# ── cached ready-to-ship queue ───────────────────────────────────────────────
+
+def replace_queue(account_id, orders, db_path=DB_PATH):
+    """Replace the cached queue for an account with a fresh fetch. `orders` is a list of
+    dicts with the order summary fields + an `items` list (stored as JSON)."""
+    import json
+    ts = _now()
+    conn = get_db(db_path)
+    conn.execute("DELETE FROM shipment_queue WHERE account_id=?", (account_id,))
+    for o in orders:
+        conn.execute(
+            "INSERT INTO shipment_queue (account_id, order_id, purchase_date, status, ship_by, "
+            "deliver_by, service, prime, total, currency, items_json, refreshed_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (account_id, o.get("order_id"), o.get("purchase_date"), o.get("status"),
+             o.get("ship_by"), o.get("deliver_by"), o.get("service"), 1 if o.get("prime") else 0,
+             str(o.get("total") or ""), o.get("currency"), json.dumps(o.get("items") or []), ts))
+    conn.commit()
+    conn.close()
+
+
+def list_queue(account_id, db_path=DB_PATH):
+    import json
+    conn = get_db(db_path)
+    rows = conn.execute(
+        "SELECT * FROM shipment_queue WHERE account_id=? ORDER BY ship_by, order_id",
+        (account_id,)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["items"] = json.loads(d.get("items_json") or "[]")
+        except Exception:
+            d["items"] = []
+        out.append(d)
+    return out
+
+
+def queue_refreshed_at(account_id, db_path=DB_PATH):
+    conn = get_db(db_path)
+    r = conn.execute("SELECT MAX(refreshed_at) AS m FROM shipment_queue WHERE account_id=?",
+                     (account_id,)).fetchone()
+    conn.close()
+    return r["m"] if r else None
 
 
 def get_package_default(account_id, canonical_sku, db_path=DB_PATH):

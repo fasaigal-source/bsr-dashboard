@@ -7,6 +7,7 @@ only pulled later for the packing slip), so the queue works without RDT.
 
 Nothing is written and nothing is purchased here — this is the "what do I need to ship" read.
 """
+import time
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -105,3 +106,17 @@ def order_items(cfg, account, order_id):
             title=it.get("Title") or "",
         ))
     return items
+
+
+def sync_orders(cfg, account, days=30):
+    """Full fetch for caching: unshipped orders + each order's items. Paced within the
+    getOrderItems burst. Returns the order list with an `items` key on each."""
+    orders = list_unshipped(cfg, account, days=days)
+    for o in orders:
+        try:
+            o["items"] = order_items(cfg, account, o["order_id"])
+        except Exception as e:
+            log.warning("items fetch failed for %s: %s", o.get("order_id"), e)
+            o["items"] = []
+        time.sleep(0.3)
+    return orders
