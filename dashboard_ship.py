@@ -19,9 +19,8 @@ log = logging.getLogger(__name__)
 
 
 def _cfg_accounts():
-    cfg = pl_tracker.load_config()
-    accts = [a for a in pl_tracker.get_effective_accounts(cfg) if a.get("refresh_token")]
-    return cfg, accts
+    # config.json locally, Railway env vars in production (see load_spapi_config)
+    return module5_orders.load_spapi_config()
 
 
 def _account(accts, account_id):

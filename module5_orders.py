@@ -14,6 +14,41 @@ log = logging.getLogger(__name__)
 MARKETPLACE_ID = "A1F83G8C2ARO7P"   # Amazon UK
 
 
+def load_spapi_config():
+    """(cfg, accounts) for SP-API, working both locally and on Railway.
+
+    Local dev: config.json (via pl_tracker) — used if it carries LWA creds + a token.
+    Railway (no config.json): built from environment variables —
+        SPAPI_LWA_APP_ID          your LWA app id
+        SPAPI_LWA_CLIENT_SECRET   your LWA client secret
+        SPAPI_ACCOUNTS            JSON list, e.g.
+            [{"account_id":"M4Mart_UK","refresh_token":"Atzr|...","marketplace_id":"A1F83G8C2ARO7P"}]
+    Returns ({"credentials":{lwa_app_id,lwa_client_secret}, "accounts":[...]}, accounts-with-token).
+    Secrets live only in Railway variables — never in the repo."""
+    import os
+    import json
+    import pl_tracker
+    cfg = pl_tracker.load_config()
+    if cfg.get("credentials", {}).get("lwa_app_id"):
+        accts = [a for a in pl_tracker.get_effective_accounts(cfg) if a.get("refresh_token")]
+        if accts:
+            return cfg, accts
+    app_id = os.environ.get("SPAPI_LWA_APP_ID")
+    secret = os.environ.get("SPAPI_LWA_CLIENT_SECRET")
+    raw = os.environ.get("SPAPI_ACCOUNTS")
+    if app_id and secret and raw:
+        try:
+            accounts = json.loads(raw)
+        except Exception as e:
+            log.warning("SPAPI_ACCOUNTS is not valid JSON: %s", e)
+            accounts = []
+        for a in accounts:
+            a.setdefault("marketplace_id", MARKETPLACE_ID)
+        cfg = {"credentials": {"lwa_app_id": app_id, "lwa_client_secret": secret}, "accounts": accounts}
+        return cfg, [a for a in accounts if a.get("refresh_token")]
+    return cfg, []
+
+
 def _client(cfg, account):
     from sp_api.api import Orders
     import module1_collector as m1
