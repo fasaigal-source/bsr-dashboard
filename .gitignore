@@ -55,6 +55,8 @@
 # Module 5a (Amazon label & pack-slip pipeline)
 !/module5_labels_db.py
 !/dashboard_packages.py
+!/module5_orders.py
+!/dashboard_ship.py
 
 # one-time maintenance triggers (internal-network reprocess, etc.)
 !/dashboard_admin.py

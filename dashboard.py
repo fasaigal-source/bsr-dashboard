@@ -24,6 +24,7 @@ import dashboard_channels  # noqa: F401 -- registers the multi-channel overview 
 import dashboard_calculator # noqa: F401 -- registers the static Scale-up calculator on `app`
 import dashboard_packages   # noqa: F401 -- registers the M5a package-defaults page on `app`
 import dashboard_admin      # noqa: F401 -- registers one-time maintenance triggers on `app`
+import dashboard_ship       # noqa: F401 -- registers the M5a ready-to-ship queue on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
