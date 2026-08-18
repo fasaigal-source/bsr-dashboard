@@ -22,6 +22,8 @@ import dashboard_module3   # noqa: F401 -- registers Module 3 (PPC) routes on `a
 import dashboard_expenses  # noqa: F401 -- registers Expenses/Overheads routes on `app`
 import dashboard_channels  # noqa: F401 -- registers the multi-channel overview on `app`
 import dashboard_calculator # noqa: F401 -- registers the static Scale-up calculator on `app`
+import dashboard_packages   # noqa: F401 -- registers the M5a package-defaults page on `app`
+import dashboard_admin      # noqa: F401 -- registers one-time maintenance triggers on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
@@ -33,6 +35,7 @@ import pl_amazon
 import pl_ppc
 import pl_expenses
 import mirakl_db
+import module5_labels_db
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,8 @@ def _bootstrap():
         ("ppc schema",               pl_ppc.init_ppc_schema),
         ("expenses schema",          pl_expenses.init_expenses_schema),
         ("mirakl schema",            mirakl_db.init_mirakl_schema),
+        ("labels schema (M5a)",      module5_labels_db.init_labels_schema),
+        ("admin schema",             dashboard_admin.init_admin_schema),
         ("seed csvs",                pl_cogs.seed_from_csvs),
         ("seed confirmed asins",     pl_cogs.seed_confirmed_asin_pairs),
         ("seed asin from managed",   pl_cogs.seed_asin_from_managed_asins),

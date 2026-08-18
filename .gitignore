@@ -52,6 +52,16 @@
 !/mirakl_sync.py
 !/mirakl_worker.py
 
+# Module 5a (Amazon label & pack-slip pipeline)
+!/module5_labels_db.py
+!/dashboard_packages.py
+
+# one-time maintenance triggers (internal-network reprocess, etc.)
+!/dashboard_admin.py
+
 # seed CSVs the app reads at boot
 !/sku_aliases.csv
 !/price_families.csv
+
+# one-off maintenance tool (run manually against the live DB; Railway never runs it)
+!/apply_sku_map_master.py
