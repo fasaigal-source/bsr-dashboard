@@ -50,6 +50,15 @@ def _load_config():
             cfg["mirakl_accounts"].update(env_accounts)
         except Exception as e:
             log.warning("MIRAKL_ACCOUNTS is not valid JSON: %s", e)
+    # settings page (DB) — wins over env + config.json
+    try:
+        import module5_labels_db as m5
+        db_accounts = m5.get_setting("mirakl_accounts")
+        if db_accounts:
+            cfg.setdefault("mirakl_accounts", {})
+            cfg["mirakl_accounts"].update(db_accounts)
+    except Exception:
+        pass
     return cfg
 
 

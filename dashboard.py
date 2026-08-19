@@ -26,6 +26,7 @@ import dashboard_packages   # noqa: F401 -- registers the M5a package-defaults p
 import dashboard_admin      # noqa: F401 -- registers one-time maintenance triggers on `app`
 import dashboard_ship       # noqa: F401 -- registers the M5a ready-to-ship queue on `app`
 import dashboard_mirakl     # noqa: F401 -- registers the Mirakl connection test on `app`
+import dashboard_settings   # noqa: F401 -- registers the website Settings page on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema

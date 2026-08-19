@@ -34,6 +34,20 @@ def load_spapi_config():
         accts = [a for a in pl_tracker.get_effective_accounts(cfg) if a.get("refresh_token")]
         if accts:
             return cfg, accts
+    # settings page (DB) — wins over env vars
+    try:
+        import module5_labels_db as m5
+        s = m5.get_setting("spapi")
+        if s and s.get("lwa_app_id") and s.get("accounts"):
+            accts = [a for a in s["accounts"] if a.get("refresh_token")]
+            for a in accts:
+                a.setdefault("marketplace_id", MARKETPLACE_ID)
+            if accts:
+                return ({"credentials": {"lwa_app_id": s["lwa_app_id"],
+                                         "lwa_client_secret": s.get("lwa_client_secret")},
+                         "accounts": accts}, accts)
+    except Exception as e:
+        log.warning("spapi settings read failed: %s", e)
     app_id = os.environ.get("SPAPI_LWA_APP_ID")
     secret = os.environ.get("SPAPI_LWA_CLIENT_SECRET")
     raw = os.environ.get("SPAPI_ACCOUNTS")
@@ -124,9 +138,16 @@ def order_items(cfg, account, order_id):
 def load_ship_from():
     """Seller's dispatch address for Buy-Shipping quotes. From env SHIP_FROM (JSON) —
     Amazon requires Name, AddressLine1, City, PostalCode, CountryCode (Phone/Email help).
-    Returns the dict or None if unset."""
+    Settings page (DB) wins over the SHIP_FROM env var. Returns the dict or None."""
     import os
     import json
+    try:
+        import module5_labels_db as m5
+        s = m5.get_setting("ship_from")
+        if s:
+            return s
+    except Exception:
+        pass
     raw = os.environ.get("SHIP_FROM")
     if not raw:
         return None

@@ -58,6 +58,7 @@
 !/dashboard_packages.py
 !/module5_orders.py
 !/dashboard_ship.py
+!/dashboard_settings.py
 
 # one-time maintenance triggers (internal-network reprocess, etc.)
 !/dashboard_admin.py

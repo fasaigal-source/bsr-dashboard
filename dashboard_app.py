@@ -42,6 +42,7 @@ _NAV_ITEMS = [
     ("/packages", "Package dims"),
     ("__sep__", ""),
     ("/calculator", "Scale-up calculator"),
+    ("/settings", "Settings"),
 ]
 
 _NAV_STYLE = (

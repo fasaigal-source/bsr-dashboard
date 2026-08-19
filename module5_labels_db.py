@@ -144,9 +144,49 @@ def init_labels_schema(db_path=DB_PATH):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_shiplabel_acct_status "
                  "ON shipment_labels(account_id, status)")
+
+    # app_settings: key/value (JSON) store so credentials + config can be edited on the
+    # website's Settings page instead of Railway env vars. Loaders read this FIRST, then
+    # fall back to env vars / config.json.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            skey        TEXT PRIMARY KEY,
+            sval        TEXT,
+            updated_at  TEXT
+        )
+    """)
     conn.commit()
     conn.close()
     log.info("Module 5a labels schema initialised.")
+
+
+def get_setting(key, db_path=DB_PATH):
+    """JSON-decoded value for a settings key, or None."""
+    import json
+    conn = get_db(db_path)
+    try:
+        r = conn.execute("SELECT sval FROM app_settings WHERE skey=?", (key,)).fetchone()
+    except Exception:
+        r = None
+    conn.close()
+    if not r or r["sval"] is None:
+        return None
+    try:
+        return json.loads(r["sval"])
+    except Exception:
+        return None
+
+
+def set_setting(key, value, db_path=DB_PATH):
+    """Upsert a JSON-encoded settings value."""
+    import json
+    conn = get_db(db_path)
+    conn.execute(
+        "INSERT INTO app_settings (skey, sval, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(skey) DO UPDATE SET sval=excluded.sval, updated_at=excluded.updated_at",
+        (key, json.dumps(value), _now()))
+    conn.commit()
+    conn.close()
 
 
 # ── sku_package_defaults CRUD ────────────────────────────────────────────────
