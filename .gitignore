@@ -51,6 +51,7 @@
 !/mirakl_client.py
 !/mirakl_sync.py
 !/mirakl_worker.py
+!/dashboard_mirakl.py
 
 # Module 5a (Amazon label & pack-slip pipeline)
 !/module5_labels_db.py

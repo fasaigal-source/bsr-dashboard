@@ -27,6 +27,7 @@ COLLECTOR_STATUS_URL = "https://web-production-de115.up.railway.app/"
 _NAV_ITEMS = [
     ("/", "Home"),
     ("/channels", "Channels"),
+    ("/mirakl/test", "Mirakl"),
     ("/products", "Products"),
     ("/baseline", "Market baseline"),
     ("__sep__", ""),

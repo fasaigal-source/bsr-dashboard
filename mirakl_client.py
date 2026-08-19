@@ -31,11 +31,26 @@ _ACCOUNTS = ("tesco", "bandq")
 # ── config / creds ───────────────────────────────────────────────────────────
 
 def _load_config():
+    """config.json locally; on Railway (no config.json) the mirakl_accounts block comes
+    from the MIRAKL_ACCOUNTS env var (JSON), e.g.
+        {"tesco":{"base_url":"https://...","api_key":"...","shop_id":"..."},
+         "bandq":{"base_url":"https://...","api_key":"...","shop_id":"..."}}
+    Env entries win over config.json. Secrets live only in Railway variables, never the repo."""
+    cfg = {}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except FileNotFoundError:
-        return {}
+        pass
+    raw = os.environ.get("MIRAKL_ACCOUNTS")
+    if raw:
+        try:
+            env_accounts = json.loads(raw)
+            cfg.setdefault("mirakl_accounts", {})
+            cfg["mirakl_accounts"].update(env_accounts)
+        except Exception as e:
+            log.warning("MIRAKL_ACCOUNTS is not valid JSON: %s", e)
+    return cfg
 
 
 def creds_for(account):
