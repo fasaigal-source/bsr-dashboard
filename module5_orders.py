@@ -94,18 +94,94 @@ def list_unshipped(cfg, account, days=30, limit=150):
 
 
 def order_items(cfg, account, order_id):
-    """Line items for one order: [{sku, asin, qty, title}]. One get_order_items call."""
+    """Line items for one order: [{order_item_id, sku, asin, qty, title}]."""
     client, _mid = _client(cfg, account)
     resp = client.get_order_items(order_id)
     items = []
     for it in (resp.payload or {}).get("OrderItems", []):
         items.append(dict(
+            order_item_id=it.get("OrderItemId") or "",
             sku=it.get("SellerSKU") or "",
             asin=it.get("ASIN") or "",
             qty=int(it.get("QuantityOrdered") or 0),
             title=it.get("Title") or "",
         ))
     return items
+
+
+# ── Merchant Fulfillment: rate quote (read-only; NO purchase here) ────────────
+
+def load_ship_from():
+    """Seller's dispatch address for Buy-Shipping quotes. From env SHIP_FROM (JSON) —
+    Amazon requires Name, AddressLine1, City, PostalCode, CountryCode (Phone/Email help).
+    Returns the dict or None if unset."""
+    import os
+    import json
+    raw = os.environ.get("SHIP_FROM")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        log.warning("SHIP_FROM is not valid JSON: %s", e)
+        return None
+
+
+def build_shipment_request(order_id, items, ship_from, weight_g, length_cm, width_cm, height_cm):
+    """ShipmentRequestDetails for get_eligible_shipment_services / create_shipment.
+    Ship-TO is derived by Amazon from the order id, so no buyer PII is sent here."""
+    return {
+        "AmazonOrderId": order_id,
+        "ItemList": [{"OrderItemId": it["order_item_id"], "Quantity": int(it.get("qty") or 1)}
+                     for it in items if it.get("order_item_id")],
+        "ShipFromAddress": ship_from,
+        "PackageDimensions": {"Length": float(length_cm), "Width": float(width_cm),
+                              "Height": float(height_cm), "Unit": "centimeters"},
+        "Weight": {"Value": int(weight_g), "Unit": "g"},
+        "ShippingServiceOptions": {"DeliveryExperience": "DeliveryConfirmationWithoutSignature",
+                                   "CarrierWillPickUp": False, "LabelFormat": "PDF"},
+    }
+
+
+def eligible_services(cfg, account, request_details):
+    """Call getEligibleShipmentServices. Returns (services, notes) where services is a list
+    of {id, offer_id, carrier, name, amount, currency, earliest, latest, options} and notes
+    is a list of unavailable/terms messages. Raises on hard API failure."""
+    client, _mid = _client(cfg, account)
+    resp = client.get_eligible_shipment_services(request_details)
+    p = resp.payload or {}
+    services = []
+    for s in p.get("ShippingServiceList", []):
+        rate = s.get("Rate") or {}
+        services.append(dict(
+            id=s.get("ShippingServiceId"),
+            offer_id=s.get("ShippingServiceOfferId"),
+            carrier=s.get("CarrierName"),
+            name=s.get("ShippingServiceName"),
+            amount=rate.get("Amount"),
+            currency=rate.get("CurrencyCode") or "GBP",
+            earliest=(s.get("EarliestEstimatedDeliveryDate") or "")[:10],
+            latest=(s.get("LatestEstimatedDeliveryDate") or "")[:10],
+        ))
+    notes = []
+    for c in p.get("TemporarilyUnavailableCarrierList", []) or []:
+        notes.append(f"temporarily unavailable: {c.get('CarrierName')}")
+    for c in p.get("TermsAndConditionsNotAcceptedCarrierList", []) or []:
+        notes.append(f"terms not accepted: {c.get('CarrierName')} — accept in Seller Central once")
+    return services, notes
+
+
+def pick_cheapest(services, deliver_by=None):
+    """Cheapest service that still meets the delivery deadline (LatestEstimatedDeliveryDate
+    <= deliver_by). If none meet it (or no deadline), the cheapest overall, flagged."""
+    priced = [s for s in services if s.get("amount") is not None]
+    if not priced:
+        return None, False
+    if deliver_by:
+        in_time = [s for s in priced if (s.get("latest") or "9999") <= deliver_by]
+        if in_time:
+            return min(in_time, key=lambda s: s["amount"]), True
+    return min(priced, key=lambda s: s["amount"]), False if deliver_by else True
 
 
 def sync_orders(cfg, account, days=30):
