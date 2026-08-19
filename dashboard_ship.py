@@ -104,6 +104,18 @@ QUEUE_HTML = """
 </style>
 <script>
  function selAll(cb){document.querySelectorAll('input.qsel:not(:disabled)').forEach(function(x){x.checked=cb.checked});}
+ function autoSave(oid){
+   var g=function(n){var e=document.querySelector('[name="'+n+'__'+CSS.escape(oid)+'"]');return e?e.value:'';};
+   var acct=document.querySelector('form[action="/ship/bulk"] input[name=account]').value;
+   var st=document.getElementById('st__'+oid); if(st){st.innerHTML='<span class="pill" style="background:#eef4f4;color:#0e5c5b">saving…</span>';}
+   var fd=new FormData();
+   fd.append('account',acct); fd.append('canonical_sku',g('canon')); fd.append('asin',g('asin'));
+   fd.append('weight_g',g('w')); fd.append('parcel_size',g('s'));
+   fetch('/ship/save-one',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(j){
+     if(st){st.innerHTML=j.complete?'<span class="pill ok">ready</span>':'<span class="pill no">enter</span>';}
+     var cb=document.querySelector('input.qsel[value="'+CSS.escape(oid)+'"]'); if(cb){cb.disabled=false;}
+   }).catch(function(){if(st){st.innerHTML='<span class="pill no">save failed</span>';}});
+ }
 </script></head><body>
 {{ nav|safe }}
 <div class="wrap">
@@ -146,12 +158,12 @@ QUEUE_HTML = """
           <td><b>{{ r.item.sku }}</b> <span class="muted">→ {{ r.item.canonical }}</span>
               {% if r.extra %}<br><a class="muted" href="/ship/order/{{ r.order_id }}?account={{ account }}">+{{ r.extra }} more</a>{% endif %}</td>
           <td>{{ r.item.qty }}</td>
-          <td><input class="n" type="number" step="1" name="w__{{ r.order_id }}" value="{{ r.item.weight_g if r.item.weight_g is not none else '' }}"></td>
-          <td><select name="s__{{ r.order_id }}">
+          <td><input class="n" type="number" step="1" name="w__{{ r.order_id }}" value="{{ r.item.weight_g if r.item.weight_g is not none else '' }}" onchange="autoSave('{{ r.order_id }}')"></td>
+          <td><select name="s__{{ r.order_id }}" onchange="autoSave('{{ r.order_id }}')">
               <option value="">— size —</option>
               {% for name,l,w,h in sizes %}<option value="{{ name }}" {{ 'selected' if name==r.item.parcel_size else '' }}>{{ name }} ({{ l }}×{{ w }}×{{ h }})</option>{% endfor %}
             </select></td>
-          <td>{% if r.item.complete %}<span class="pill ok">ready</span>{% else %}<span class="pill no">enter</span>{% endif %}</td>
+          <td><span id="st__{{ r.order_id }}">{% if r.item.complete %}<span class="pill ok">ready</span>{% else %}<span class="pill no">enter</span>{% endif %}</span></td>
           <td>{% if r.quote %}{% if r.quote.error %}<span class="pill errp">{{ r.quote.error }}</span>{% else %}<b>£{{ "%.2f"|format(r.quote.amount|float) }}</b> {{ r.quote.name }}{% if not r.quote.met %} <span class="pill no">late</span>{% endif %} <a class="muted" href="/ship/quote/{{ r.order_id }}?account={{ account }}">options</a>{% endif %}{% endif %}</td>
           {% else %}
           <td class="muted" colspan="6">no items — <a href="/ship/order/{{ r.order_id }}?account={{ account }}">open</a></td>
@@ -345,6 +357,27 @@ def ship_quote(order_id):
                 error = f"Quote failed: {str(e)[:250]}"
     return render_template_string(QUOTE_HTML, order_id=order_id, account=account, order=order,
                                   services=services, notes=notes, picked=picked, met=met, parcel=parcel, error=error)
+
+
+@app.route("/ship/save-one", methods=["POST"])
+def ship_save_one():
+    """AJAX auto-save for one row's weight/parcel-size. Returns {ok, complete}."""
+    account = request.form.get("account")
+    canon = request.form.get("canonical_sku")
+    if not canon:
+        return {"ok": False, "error": "no canonical"}
+    try:
+        m5.upsert_package_default(
+            account, canon, asin=(request.form.get("asin") or None),
+            weight_g=_num(request.form.get("weight_g"), int),
+            parcel_size=(request.form.get("parcel_size") or None),
+            source="manual")
+        d = m5.get_package_default(account, canon) or {}
+        complete = all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm"))
+        return {"ok": True, "complete": complete}
+    except Exception as e:
+        log.warning("save-one %s: %s", canon, e)
+        return {"ok": False, "error": str(e)[:120]}
 
 
 @app.route("/ship/save-default", methods=["POST"])
