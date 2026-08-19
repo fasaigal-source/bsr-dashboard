@@ -84,17 +84,13 @@ def is_configured(account):
 
 
 def looks_like_sandbox(creds, shop_json=None):
-    """Best-effort sandbox detector — flag clearly if either key resolves to a
-    non-prod instance. Heuristic on the host + any shop metadata; not authoritative."""
+    """Best-effort sandbox detector — flag only if the HOST clearly names a non-prod
+    instance. Host-only on purpose: scanning the account JSON for substrings like
+    'test'/'uat' produced false positives (they appear inside unrelated field values),
+    so a live prod host such as tescouk-prod.mirakl.net no longer trips the flag."""
     host = (creds or {}).get("base_url", "").lower()
-    hints = ("sandbox", "preprod", "pre-prod", "staging", "uat", "test.")
-    if any(h in host for h in hints):
-        return True
-    if shop_json:
-        blob = json.dumps(shop_json).lower()
-        if any(h in blob for h in ("sandbox", "preprod", "staging", "uat")):
-            return True
-    return False
+    hints = ("sandbox", "preprod", "pre-prod", "staging", ".uat.", "-uat.", "uat-", "test.")
+    return any(h in host for h in hints)
 
 
 def _headers(creds):

@@ -43,8 +43,8 @@ _NAV_GROUPS = [
         ("/ppc", "PPC"),
         ("/calculator", "Scale-up calculator"),
         ("/baseline", "Market baseline"),
+        ("/channels", "Channels report"),
     ]},
-    ("/channels", "Channels"),
     {"label": "Settings", "items": [
         ("/settings", "Channels &amp; dispatch"),
         ("/mirakl/test", "Mirakl connection test"),
