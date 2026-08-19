@@ -58,6 +58,16 @@ def _client(cfg, account):
     return Orders(credentials=creds, marketplace=m1.get_marketplace(mid)), mid
 
 
+def _mf_client(cfg, account):
+    """Merchant Fulfillment client — for quotes (getEligibleShipmentServices) and, later,
+    createShipment. Separate from the Orders client above."""
+    from sp_api.api import MerchantFulfillment
+    import module1_collector as m1
+    creds = m1.make_credentials(cfg, account)
+    mid = account.get("marketplace_id") or MARKETPLACE_ID
+    return MerchantFulfillment(credentials=creds, marketplace=m1.get_marketplace(mid))
+
+
 def list_unshipped(cfg, account, days=30, limit=150):
     """Unshipped / partially-shipped MFN orders in the last `days`. One get_orders call
     (paginated), no per-item calls — fast enough for a page load. Returns order summaries;
@@ -147,7 +157,7 @@ def eligible_services(cfg, account, request_details):
     """Call getEligibleShipmentServices. Returns (services, notes) where services is a list
     of {id, offer_id, carrier, name, amount, currency, earliest, latest, options} and notes
     is a list of unavailable/terms messages. Raises on hard API failure."""
-    client, _mid = _client(cfg, account)
+    client = _mf_client(cfg, account)
     resp = client.get_eligible_shipment_services(request_details)
     p = resp.payload or {}
     services = []
