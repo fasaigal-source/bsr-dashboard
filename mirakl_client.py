@@ -112,22 +112,61 @@ def _require(account):
 
 # ── reads ────────────────────────────────────────────────────────────────────
 
+# Probe endpoints, cheapest/most-permissive first. /api/version is a bare liveness
+# check (any authenticated user); /api/account is the canonical seller identity; only
+# then /api/shops, which on some operators (Tesco/Kingfisher) is operator-scoped and
+# 403s for a plain shop key even when the key is perfectly valid.
+_PROBE_ENDPOINTS = ("/api/version", "/api/account", "/api/shops")
+
+
+def _shop_name_from(payload):
+    """Pull a human shop name out of /api/account or /api/shops JSON (shapes vary)."""
+    if not isinstance(payload, dict):
+        return None
+    for k in ("shop_name", "name", "shopName"):
+        if payload.get(k):
+            return payload[k]
+    shops = payload.get("shops")
+    if isinstance(shops, list) and shops:
+        s0 = shops[0]
+        return s0.get("shop_name") or s0.get("name")
+    return None
+
+
 def smoke_test(account, timeout=30):
-    """§1 smoke test — GET /api/shops. Confirms the Authorization header format and
-    that the key is live. Returns {ok, status, sandbox, shop, detail}. Run this FIRST,
-    for BOTH accounts, before trusting anything else."""
+    """Read-only connection test. Probes several endpoints so a 403 on one (a permission
+    scope) can be told apart from every endpoint failing (a key-level block or IP
+    allowlist). Returns {ok, status, sandbox, shop, shop_name, detail, probes}.
+
+    ok = any probe returned 200. `probes` lists each endpoint's status for diagnosis."""
     creds = _require(account)
-    try:
-        r = httpx.get(f"{creds['base_url']}/api/shops",
-                      headers=_headers(creds), timeout=timeout)
-        ok = r.status_code == 200
-        shop = r.json() if ok else None
-        return {"ok": ok, "status": r.status_code,
-                "sandbox": looks_like_sandbox(creds, shop),
-                "shop": shop, "detail": None if ok else r.text[:300]}
-    except Exception as e:
-        return {"ok": False, "status": None, "sandbox": looks_like_sandbox(creds),
-                "shop": None, "detail": str(e)[:300]}
+    probes, connected, shop_json = [], False, None
+    for ep in _PROBE_ENDPOINTS:
+        try:
+            r = httpx.get(f"{creds['base_url']}{ep}", headers=_headers(creds), timeout=timeout)
+            ok = r.status_code == 200
+            body = None
+            if ok:
+                try:
+                    body = r.json()
+                except Exception:
+                    body = None
+            probes.append({"endpoint": ep, "status": r.status_code, "ok": ok,
+                           "detail": None if ok else (r.text or "")[:200]})
+            if ok:
+                connected = True
+                if ep in ("/api/account", "/api/shops") and isinstance(body, (dict, list)):
+                    shop_json = body if isinstance(body, dict) else {"shops": body}
+        except Exception as e:
+            probes.append({"endpoint": ep, "status": None, "ok": False, "detail": str(e)[:200]})
+    best = next((p for p in probes if p["ok"]), None) or probes[-1]
+    # a concise failure summary: which endpoints returned what
+    detail = None
+    if not connected:
+        detail = "; ".join(f"{p['endpoint']}→{p['status'] or 'err'}" for p in probes)
+    return {"ok": connected, "status": best["status"], "probes": probes,
+            "sandbox": looks_like_sandbox(creds, shop_json),
+            "shop": shop_json, "shop_name": _shop_name_from(shop_json), "detail": detail}
 
 
 def get_new_orders(account, since=None, max_pages=50, timeout=60):

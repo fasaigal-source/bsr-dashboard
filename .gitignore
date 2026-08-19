@@ -60,6 +60,10 @@
 !/dashboard_ship.py
 !/dashboard_settings.py
 
+# Module 6 (live Amazon inventory snapshot)
+!/module6_inventory.py
+!/dashboard_inventory.py
+
 # one-time maintenance triggers (internal-network reprocess, etc.)
 !/dashboard_admin.py
 

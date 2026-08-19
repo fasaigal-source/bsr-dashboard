@@ -27,6 +27,7 @@ import dashboard_admin      # noqa: F401 -- registers one-time maintenance trigg
 import dashboard_ship       # noqa: F401 -- registers the M5a ready-to-ship queue on `app`
 import dashboard_mirakl     # noqa: F401 -- registers the Mirakl connection test on `app`
 import dashboard_settings   # noqa: F401 -- registers the website Settings page on `app`
+import dashboard_inventory  # noqa: F401 -- registers the /inventory page on `app`
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
@@ -39,6 +40,7 @@ import pl_ppc
 import pl_expenses
 import mirakl_db
 import module5_labels_db
+import module6_inventory
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +72,7 @@ def _bootstrap():
         ("expenses schema",          pl_expenses.init_expenses_schema),
         ("mirakl schema",            mirakl_db.init_mirakl_schema),
         ("labels schema (M5a)",      module5_labels_db.init_labels_schema),
+        ("inventory schema (M6)",    module6_inventory.init_inventory_schema),
         ("admin schema",             dashboard_admin.init_admin_schema),
         ("seed csvs",                pl_cogs.seed_from_csvs),
         ("seed confirmed asins",     pl_cogs.seed_confirmed_asin_pairs),

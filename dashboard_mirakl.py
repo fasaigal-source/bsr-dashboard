@@ -29,7 +29,7 @@ PAGE = """
  code{background:#f2f4f2;padding:1px 6px;border-radius:4px}</style></head><body>{{ nav|safe }}
 <div class="wrap">
   <div class="card"><h2>Mirakl — connection test</h2>
-    <div class="muted">Read-only <code>GET /api/shops</code> for each account. Writes are
+    <div class="muted">Read-only probes (<code>/api/version</code>, <code>/api/account</code>, <code>/api/shops</code>) per account. Writes are
       <b>{{ 'DRY-RUN' if dry_run else 'LIVE' }}</b> (set <code>MIRAKL_DRY_RUN=0</code> to enable writes once these pass).</div>
   </div>
   <div class="card">
@@ -37,7 +37,8 @@ PAGE = """
     <div class="row">
       <div><b>{{ r.label }}</b> <span class="muted">({{ r.key }})</span>
         {% if r.shop_name %}<br><span class="muted">shop: {{ r.shop_name }}</span>{% endif %}
-        {% if r.detail %}<br><span class="muted">{{ r.detail }}</span>{% endif %}</div>
+        {% if r.probes %}<br><span class="muted">{% for p in r.probes %}<code>{{ p.endpoint }}→{{ p.status or 'err' }}</code>{% if not loop.last %} {% endif %}{% endfor %}</span>{% endif %}
+        {% if r.detail and not r.ok %}<br><span class="muted">{{ r.detail }}</span>{% endif %}</div>
       <div style="text-align:right">
         {% if not r.configured %}<span class="pill warn">not configured</span>
         {% elif r.ok %}<span class="pill ok">connected{% if r.status %} · {{ r.status }}{% endif %}</span>
@@ -48,9 +49,12 @@ PAGE = """
     {% endfor %}
   </div>
   <div class="card muted">
-    Not configured? Add a <code>MIRAKL_ACCOUNTS</code> variable in Railway (bsr-dashboard) as JSON:
-    <br><code>{"tesco":{"base_url":"https://…","api_key":"…","shop_id":"…"},"bandq":{"base_url":"https://…","api_key":"…","shop_id":"…"}}</code>
-    <br>Then reload this page. Once both say <b>connected</b>, set <code>MIRAKL_DRY_RUN=0</code> to go live.
+    Enter keys on the <a href="/settings">Settings → Channels</a> page (Tesco / B&amp;Q cards).
+    <br><br><b>All three endpoints 403?</b> The key reached Mirakl but was refused everywhere — usually the operator
+    <b>IP-allowlists</b> API traffic and this server's IP isn't registered, or the key/role has no API access. Ask the
+    operator to allowlist the app's outbound IP (or check the key's permissions).
+    <br><b>Only <code>/api/shops</code> 403 but the others 200?</b> The key is valid — <code>/api/shops</code> is just
+    operator-scoped; you're connected. Once a probe returns 200, set <code>MIRAKL_DRY_RUN=0</code> to go live.
   </div>
 </div></body></html>
 """
@@ -69,14 +73,10 @@ def mirakl_test():
         try:
             r = mirakl_client.smoke_test(key)
         except Exception as e:
-            r = {"ok": False, "status": None, "sandbox": False, "shop": None, "detail": str(e)[:300]}
-        shop_name = None
-        shop = r.get("shop")
-        if isinstance(shop, dict):
-            shops = shop.get("shops") or []
-            if shops:
-                shop_name = shops[0].get("shop_name") or shops[0].get("name")
+            r = {"ok": False, "status": None, "sandbox": False, "shop": None,
+                 "shop_name": None, "detail": str(e)[:300], "probes": []}
         results.append(dict(key=key, label=label, configured=True, ok=r.get("ok"),
                             status=r.get("status"), sandbox=r.get("sandbox"),
-                            shop_name=shop_name, detail=r.get("detail")))
+                            shop_name=r.get("shop_name"), detail=r.get("detail"),
+                            probes=r.get("probes") or []))
     return render_template_string(PAGE, results=results, dry_run=mirakl_client.is_dry_run())
