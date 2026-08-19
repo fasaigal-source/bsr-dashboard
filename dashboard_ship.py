@@ -136,7 +136,7 @@ QUEUE_HTML = """
         <tr><th><input type="checkbox" onclick="selAll(this)"></th><th>Order</th><th>Ship by</th><th>Service</th><th>SKU → canonical</th><th>Qty</th><th>Weight (g)</th><th>Parcel size</th><th>Status</th><th>Quote</th></tr>
         {% for r in rows %}
         <tr class="{{ 'miss' if (r.item and not r.item.complete) else '' }}">
-          <td><input type="checkbox" class="qsel" name="sel" value="{{ r.order_id }}" {{ 'disabled' if not (r.item and r.item.complete) else '' }}></td>
+          <td><input type="checkbox" class="qsel" name="sel" value="{{ r.order_id }}" {{ 'disabled' if not r.item else '' }}></td>
           <td><b>{{ r.order_id }}</b><br><span class="muted">£{{ r.total }} · {{ r.status }}</span></td>
           <td>{{ r.ship_by }}</td>
           <td>{% if r.prime %}<span class="pill prime">Prime</span> {% endif %}<span class="muted">{{ r.service }}</span></td>
