@@ -1,11 +1,9 @@
 """dashboard_ship.py — Module 5a ready-to-ship queue ("/ship").
 
-READ-ONLY this phase. The queue is CACHED (shipment_queue): a "Refresh from Amazon" fetch
-pulls unshipped FBM orders + their items once, then the page loads instantly from cache.
-Each order shows its item's canonical with weight PRE-FILLED from the package default and a
-parcel-SIZE dropdown (presets that fill the dims on save) — so prepping an order is: check
-weight, pick a size, Save. Anything saved becomes that SKU's default (learn-as-you-go).
-No rate quote and no purchase yet — those are M5a-5 / M5a-6.
+READ-ONLY this phase. Cached queue (shipment_queue) with everything on ONE page:
+per order — weight (pre-filled) + parcel-size dropdown; tick rows and Quote/Save in bulk.
+Quoting is inline (getEligibleShipmentServices, cheapest service meeting the delivery
+promise), shown right in the row. No purchase yet — that's M5a-6.
 """
 import logging
 
@@ -20,7 +18,7 @@ log = logging.getLogger(__name__)
 
 
 def _cfg_accounts():
-    return module5_orders.load_spapi_config()   # config.json locally, env vars on Railway
+    return module5_orders.load_spapi_config()
 
 
 def _account(accts, account_id):
@@ -36,8 +34,6 @@ def _num(v, cast):
 
 
 def _resolve_primary(account, items):
-    """The order's primary line (first item) resolved to canonical + its saved package
-    default. Returns (row_dict, extra_item_count)."""
     if not items:
         return None, 0
     it = items[0]
@@ -51,18 +47,51 @@ def _resolve_primary(account, items):
             max(0, len(items) - 1))
 
 
+def _quote_one(cfg, acct, account, order):
+    """Auto-picked service for one order, or an {error}. Aggregates weight across lines,
+    uses the first line's dims (single-item is the norm)."""
+    items, ok, total_w, dims = [], True, 0, None
+    for it in order.get("items", []):
+        canon = pl_cogs.resolve_to_canonical(it.get("sku")) if it.get("sku") else ""
+        d = m5.get_package_default(account, canon) or {}
+        if not all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm")):
+            ok = False
+        total_w += (d.get("weight_g") or 0) * (it.get("qty") or 1)
+        if dims is None and d.get("length_cm") is not None:
+            dims = (d["length_cm"], d["width_cm"], d["height_cm"])
+        items.append(dict(it, canonical=canon))
+    if not ok or not dims:
+        return {"error": "not ready"}
+    if not module5_orders.load_ship_from():
+        return {"error": "set SHIP_FROM"}
+    try:
+        req = module5_orders.build_shipment_request(order["order_id"], items,
+                                                    module5_orders.load_ship_from(),
+                                                    total_w, dims[0], dims[1], dims[2])
+        services, _notes = module5_orders.eligible_services(cfg, acct, req)
+        picked, met = module5_orders.pick_cheapest(services, order.get("deliver_by"))
+        if not picked:
+            return {"error": "no services"}
+        return {"name": picked["name"], "carrier": picked.get("carrier"),
+                "amount": picked["amount"], "latest": picked.get("latest"), "met": met,
+                "n": len(services)}
+    except Exception as e:
+        log.warning("quote failed %s: %s", order["order_id"], e)
+        return {"error": str(e)[:120]}
+
+
 QUEUE_HTML = """
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ready to ship — BSR Repricer</title>
 <style>
  *{box-sizing:border-box} body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#eef1f4;color:#12161c;margin:0}
- .wrap{max-width:1200px;margin:20px auto;padding:0 20px} a{color:#0e5c5b}
+ .wrap{max-width:1280px;margin:20px auto;padding:0 20px} a{color:#0e5c5b}
  .card{background:#fff;border-radius:12px;padding:16px 18px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px}
  h2{margin:0 0 4px;font-size:18px} .muted{color:#8a94a2;font-size:12.5px}
  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}
  select,input{padding:5px 7px;border-radius:6px;border:1px solid #dfe4e9;font-size:13px}
- input.n{width:70px;text-align:right}
+ input.n{width:66px;text-align:right}
  table{width:100%;border-collapse:collapse;font-size:13px}
  th,td{padding:6px 8px;text-align:left;border-top:1px solid #eef1f4;vertical-align:middle}
  th{color:#8a94a2;font-size:11px;text-transform:uppercase}
@@ -70,14 +99,17 @@ QUEUE_HTML = """
  .btn{background:#0e5c5b;color:#fff;border:none;border-radius:7px;padding:6px 11px;font-size:13px;cursor:pointer;text-decoration:none}
  .btn.sec{background:#eef4f4;color:#0e5c5b;border:1px solid #cfe3e2}
  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px}
- .ok{background:#e4f6ec;color:#1f7a45}.no{background:#fbe7c6;color:#8a5906}.prime{background:#eaf3ff;color:#1257a3}
+ .ok{background:#e4f6ec;color:#1f7a45}.no{background:#fbe7c6;color:#8a5906}.prime{background:#eaf3ff;color:#1257a3}.errp{background:#fcebeb;color:#a32d2d}
  .err{background:#fcebeb;color:#a32d2d;padding:10px 12px;border-radius:8px;margin:8px 0}
-</style></head><body>
+</style>
+<script>
+ function selAll(cb){document.querySelectorAll('input.qsel:not(:disabled)').forEach(function(x){x.checked=cb.checked});}
+</script></head><body>
 {{ nav|safe }}
 <div class="wrap">
   <div class="card">
     <h2>Ready to ship <span class="muted">— unshipped FBM orders</span></h2>
-    <div class="muted">Check weight (pre-filled) · pick a parcel size · Save. Saved data becomes that SKU's default. No purchases here.</div>
+    <div class="muted">Check weight (pre-filled) · pick a parcel size · tick rows and Quote/Save in bulk. Quotes show in the row. No purchases here.</div>
     <div class="bar">
       <form method="GET" action="/ship" style="margin:0;display:flex;gap:8px;align-items:center">
         <label class="muted">Account:
@@ -93,36 +125,42 @@ QUEUE_HTML = """
   </div>
   {% if error %}<div class="card"><div class="err">{{ error }}</div></div>{% endif %}
   <div class="card">
-    <table>
-      <tr><th>Order</th><th>Ship by</th><th>Service</th><th>SKU → canonical</th><th>Qty</th><th>Weight (g)</th><th>Parcel size</th><th>Status</th><th></th></tr>
-      {% for r in rows %}
-      <tr class="{{ 'miss' if (r.item and not r.item.complete) else '' }}">
-        <td><b>{{ r.order_id }}</b><br><span class="muted">£{{ r.total }} · {{ r.status }}</span></td>
-        <td>{{ r.ship_by }}</td>
-        <td>{% if r.prime %}<span class="pill prime">Prime</span> {% endif %}<span class="muted">{{ r.service }}</span></td>
-        {% if r.item %}
-        <form method="POST" action="/ship/save-default" style="display:contents">
-          <input type="hidden" name="account" value="{{ account }}">
-          <input type="hidden" name="canonical_sku" value="{{ r.item.canonical }}">
-          <input type="hidden" name="asin" value="{{ r.item.asin }}">
+    <form method="POST" action="/ship/bulk">
+      <input type="hidden" name="account" value="{{ account }}"><input type="hidden" name="days" value="{{ days }}">
+      <div class="bar">
+        <button class="btn" type="submit" name="action" value="quote">Quote selected</button>
+        <button class="btn sec" type="submit" name="action" value="save">Save selected</button>
+        <span class="muted">tick the rows you want, then Quote or Save</span>
+      </div>
+      <table>
+        <tr><th><input type="checkbox" onclick="selAll(this)"></th><th>Order</th><th>Ship by</th><th>Service</th><th>SKU → canonical</th><th>Qty</th><th>Weight (g)</th><th>Parcel size</th><th>Status</th><th>Quote</th></tr>
+        {% for r in rows %}
+        <tr class="{{ 'miss' if (r.item and not r.item.complete) else '' }}">
+          <td><input type="checkbox" class="qsel" name="sel" value="{{ r.order_id }}" {{ 'disabled' if not (r.item and r.item.complete) else '' }}></td>
+          <td><b>{{ r.order_id }}</b><br><span class="muted">£{{ r.total }} · {{ r.status }}</span></td>
+          <td>{{ r.ship_by }}</td>
+          <td>{% if r.prime %}<span class="pill prime">Prime</span> {% endif %}<span class="muted">{{ r.service }}</span></td>
+          {% if r.item %}
+          <input type="hidden" name="canon__{{ r.order_id }}" value="{{ r.item.canonical }}">
+          <input type="hidden" name="asin__{{ r.order_id }}" value="{{ r.item.asin }}">
           <td><b>{{ r.item.sku }}</b> <span class="muted">→ {{ r.item.canonical }}</span>
-              {% if r.extra %}<br><a class="muted" href="/ship/order/{{ r.order_id }}?account={{ account }}">+{{ r.extra }} more item(s)</a>{% endif %}</td>
+              {% if r.extra %}<br><a class="muted" href="/ship/order/{{ r.order_id }}?account={{ account }}">+{{ r.extra }} more</a>{% endif %}</td>
           <td>{{ r.item.qty }}</td>
-          <td><input class="n" type="number" step="1" name="weight_g" value="{{ r.item.weight_g if r.item.weight_g is not none else '' }}"></td>
-          <td><select name="parcel_size">
+          <td><input class="n" type="number" step="1" name="w__{{ r.order_id }}" value="{{ r.item.weight_g if r.item.weight_g is not none else '' }}"></td>
+          <td><select name="s__{{ r.order_id }}">
               <option value="">— size —</option>
               {% for name,l,w,h in sizes %}<option value="{{ name }}" {{ 'selected' if name==r.item.parcel_size else '' }}>{{ name }} ({{ l }}×{{ w }}×{{ h }})</option>{% endfor %}
             </select></td>
           <td>{% if r.item.complete %}<span class="pill ok">ready</span>{% else %}<span class="pill no">enter</span>{% endif %}</td>
-          <td style="white-space:nowrap"><button class="btn sec" type="submit">Save</button>{% if r.item.complete %} <a class="btn" href="/ship/quote/{{ r.order_id }}?account={{ account }}">Quote</a>{% endif %}</td>
-        </form>
-        {% else %}
-          <td class="muted" colspan="5">no items — <a href="/ship/order/{{ r.order_id }}?account={{ account }}">open</a></td><td></td>
-        {% endif %}
-      </tr>
-      {% endfor %}
-      {% if not rows and not error %}<tr><td colspan="9" class="muted">Nothing cached. Click <b>Refresh from Amazon</b>.</td></tr>{% endif %}
-    </table>
+          <td>{% if r.quote %}{% if r.quote.error %}<span class="pill errp">{{ r.quote.error }}</span>{% else %}<b>£{{ "%.2f"|format(r.quote.amount|float) }}</b> {{ r.quote.name }}{% if not r.quote.met %} <span class="pill no">late</span>{% endif %} <a class="muted" href="/ship/quote/{{ r.order_id }}?account={{ account }}">options</a>{% endif %}{% endif %}</td>
+          {% else %}
+          <td class="muted" colspan="6">no items — <a href="/ship/order/{{ r.order_id }}?account={{ account }}">open</a></td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+        {% if not rows and not error %}<tr><td colspan="10" class="muted">Nothing cached. Click <b>Refresh from Amazon</b>.</td></tr>{% endif %}
+      </table>
+    </form>
   </div>
 </div></body></html>
 """
@@ -134,6 +172,7 @@ def ship_queue():
     account = request.args.get("account") or (accts[0]["account_id"] if accts else "")
     days = _num(request.args.get("days"), int) or 30
     want_refresh = request.args.get("refresh") == "1"
+    quote_ids = [x for x in (request.args.get("quote") or "").split(",") if x][:25]
     error = None
     acct = _account(accts, account)
     if not acct:
@@ -151,29 +190,43 @@ def ship_queue():
     rows = []
     for o in cached:
         item, extra = _resolve_primary(account, o.get("items"))
-        rows.append(dict(order_id=o["order_id"], ship_by=o.get("ship_by"), status=o.get("status"),
-                         service=o.get("service"), prime=o.get("prime"), total=o.get("total"),
-                         item=item, extra=extra))
+        row = dict(order_id=o["order_id"], ship_by=o.get("ship_by"), status=o.get("status"),
+                   service=o.get("service"), prime=o.get("prime"), total=o.get("total"),
+                   item=item, extra=extra, quote=None)
+        if o["order_id"] in quote_ids and item and item["complete"]:
+            row["quote"] = _quote_one(cfg, acct, account, o)
+        rows.append(row)
     return render_template_string(QUEUE_HTML, accounts=[a["account_id"] for a in accts],
                                   account=account, days=days, rows=rows, error=error,
-                                  sizes=m5.PARCEL_SIZES, refreshed_at=m5.queue_refreshed_at(account) if acct else None)
+                                  sizes=m5.PARCEL_SIZES,
+                                  refreshed_at=m5.queue_refreshed_at(account) if acct else None)
 
 
-@app.route("/ship/order/<order_id>")
-def ship_order(order_id):
-    """Multi-item detail — all lines of one order (from cache), each with weight + size."""
-    cfg, accts = _cfg_accounts()
-    account = request.args.get("account") or (accts[0]["account_id"] if accts else "")
-    order = next((o for o in m5.list_queue(account) if o["order_id"] == order_id), None)
-    items = []
-    for it in (order or {}).get("items", []):
-        canon = pl_cogs.resolve_to_canonical(it.get("sku")) if it.get("sku") else ""
-        d = m5.get_package_default(account, canon) or {}
-        items.append(dict(sku=it.get("sku"), asin=it.get("asin"), qty=it.get("qty"), title=it.get("title"),
-                          canonical=canon, weight_g=d.get("weight_g"), parcel_size=d.get("parcel_size"),
-                          complete=all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm"))))
-    return render_template_string(ORDER_HTML, order_id=order_id, account=account, items=items,
-                                  sizes=m5.PARCEL_SIZES)
+@app.route("/ship/bulk", methods=["POST"])
+def ship_bulk():
+    account = request.form.get("account")
+    days = request.form.get("days") or "30"
+    action = request.form.get("action")
+    selected = request.form.getlist("sel")
+    # persist any weight/size edits on the selected rows first
+    saved = 0
+    for oid in selected:
+        canon = request.form.get(f"canon__{oid}")
+        if not canon:
+            continue
+        try:
+            m5.upsert_package_default(
+                account, canon, asin=(request.form.get(f"asin__{oid}") or None),
+                weight_g=_num(request.form.get(f"w__{oid}"), int),
+                parcel_size=(request.form.get(f"s__{oid}") or None),
+                source="manual")
+            saved += 1
+        except Exception as e:
+            log.warning("bulk save %s: %s", canon, e)
+    if action == "quote":
+        return redirect(f"/ship?account={account}&days={days}&quote={','.join(selected)}")
+    flash(f"Saved {saved} row(s).")
+    return redirect(f"/ship?account={account}&days={days}")
 
 
 ORDER_HTML = """
@@ -208,6 +261,22 @@ ORDER_HTML = """
 """
 
 
+@app.route("/ship/order/<order_id>")
+def ship_order(order_id):
+    cfg, accts = _cfg_accounts()
+    account = request.args.get("account") or (accts[0]["account_id"] if accts else "")
+    order = next((o for o in m5.list_queue(account) if o["order_id"] == order_id), None)
+    items = []
+    for it in (order or {}).get("items", []):
+        canon = pl_cogs.resolve_to_canonical(it.get("sku")) if it.get("sku") else ""
+        d = m5.get_package_default(account, canon) or {}
+        items.append(dict(sku=it.get("sku"), asin=it.get("asin"), qty=it.get("qty"), title=it.get("title"),
+                          canonical=canon, weight_g=d.get("weight_g"), parcel_size=d.get("parcel_size"),
+                          complete=all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm"))))
+    return render_template_string(ORDER_HTML, order_id=order_id, account=account, items=items,
+                                  sizes=m5.PARCEL_SIZES)
+
+
 QUOTE_HTML = """
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Quote {{ order_id }}</title>
@@ -216,39 +285,26 @@ QUOTE_HTML = """
  .card{background:#fff;border-radius:12px;padding:16px 18px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px}
  h2{margin:0 0 4px;font-size:18px} .muted{color:#8a94a2;font-size:12.5px}
  table{width:100%;border-collapse:collapse;font-size:13px} th,td{padding:8px 10px;text-align:left;border-top:1px solid #eef1f4}
- th{color:#8a94a2;font-size:11px;text-transform:uppercase}
- tr.pick{background:#e9f6ef} .price{font-variant-numeric:tabular-nums;font-weight:600}
+ th{color:#8a94a2;font-size:11px;text-transform:uppercase} tr.pick{background:#e9f6ef} .price{font-variant-numeric:tabular-nums;font-weight:600}
  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px}.ok{background:#e4f6ec;color:#1f7a45}.no{background:#fbe7c6;color:#8a5906}
- .err{background:#fcebeb;color:#a32d2d;padding:10px 12px;border-radius:8px}
- .btn{background:#0e5c5b;color:#fff;border:none;border-radius:7px;padding:6px 11px;font-size:13px;text-decoration:none}
- .dis{background:#cfd6dc;color:#6a747d;cursor:not-allowed}</style></head><body>{{ nav|safe }}
+ .err{background:#fcebeb;color:#a32d2d;padding:10px 12px;border-radius:8px}</style></head><body>{{ nav|safe }}
 <div class="wrap">
   <div class="card"><h2>Rate quote — order {{ order_id }}</h2>
     <div class="muted"><a href="/ship?account={{ account }}">← back to queue</a> · {{ account }}
-      {% if order %} · deliver by <b>{{ order.deliver_by }}</b>{% if order.prime %} · <b>Prime</b>{% endif %}{% endif %}</div>
-    {% if parcel %}<div class="muted" style="margin-top:6px">Parcel: <b>{{ parcel.weight_g }} g</b>, {{ parcel.length_cm }}×{{ parcel.width_cm }}×{{ parcel.height_cm }} cm{% if parcel.multi %} · <span class="pill no">multi-item — using first line's dims, adjust if boxed differently</span>{% endif %}</div>{% endif %}
+      {% if order %} · deliver by <b>{{ order.deliver_by }}</b>{% endif %}</div>
+    {% if parcel %}<div class="muted" style="margin-top:6px">Parcel: <b>{{ parcel.weight_g }} g</b>, {{ parcel.length_cm }}×{{ parcel.width_cm }}×{{ parcel.height_cm }} cm{% if parcel.multi %} · <span class="pill no">multi-item — first line's dims</span>{% endif %}</div>{% endif %}
   </div>
   {% if error %}<div class="card"><div class="err">{{ error }}</div></div>{% endif %}
   {% if notes %}<div class="card muted">{% for n in notes %}⚠ {{ n }}<br>{% endfor %}</div>{% endif %}
-  {% if services %}
-  <div class="card">
-    <table>
-      <tr><th>Service</th><th>Carrier</th><th>Est. delivery</th><th>Price</th><th></th></tr>
-      {% for s in services %}
-      <tr class="{{ 'pick' if picked and s.id==picked.id else '' }}">
-        <td><b>{{ s.name }}</b></td><td>{{ s.carrier }}</td>
-        <td>{{ s.latest }}{% if order and order.deliver_by and s.latest and s.latest > order.deliver_by %} <span class="pill no">late</span>{% endif %}</td>
-        <td class="price">£{{ s.amount }}</td>
-        <td>{% if picked and s.id==picked.id %}<span class="pill ok">auto-pick</span>{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </table>
-    <div class="muted" style="margin-top:10px">
-      {% if picked %}Auto-picked <b>{{ picked.name }}</b> at <b>£{{ picked.amount }}</b>{% if met %} (cheapest meeting the delivery deadline){% else %} <span class="pill no">no service meets the deadline — cheapest shown</span>{% endif %}.{% endif %}
-      <span style="margin-left:8px" class="btn dis" title="Purchase arrives in the next step (M5a-6)">Buy label — next step</span>
-    </div>
-  </div>
-  {% elif not error %}<div class="card muted">No eligible services returned for this parcel.</div>{% endif %}
+  {% if services %}<div class="card"><table>
+    <tr><th>Service</th><th>Carrier</th><th>Est. delivery</th><th>Price</th><th></th></tr>
+    {% for s in services %}<tr class="{{ 'pick' if picked and s.id==picked.id else '' }}">
+      <td><b>{{ s.name }}</b></td><td>{{ s.carrier }}</td>
+      <td>{{ s.latest }}{% if order and order.deliver_by and s.latest and s.latest > order.deliver_by %} <span class="pill no">late</span>{% endif %}</td>
+      <td class="price">{% if s.amount is not none %}£{{ "%.2f"|format(s.amount|float) }}{% else %}—{% endif %}</td><td>{% if picked and s.id==picked.id %}<span class="pill ok">auto-pick</span>{% endif %}</td>
+    </tr>{% endfor %}</table>
+    <div class="muted" style="margin-top:10px">Buy label — next step (M5a-6).</div>
+  </div>{% elif not error %}<div class="card muted">No eligible services returned.</div>{% endif %}
 </div></body></html>
 """
 
@@ -262,33 +318,31 @@ def ship_quote(order_id):
     services, notes, picked, met, parcel, error = [], [], None, False, None, None
     if not acct or not order:
         error = "Order not in cache — Refresh the queue first."
-        return render_template_string(QUOTE_HTML, order_id=order_id, account=account, order=order,
-                                      services=services, notes=notes, picked=picked, met=met, parcel=parcel, error=error)
-    items, ok, total_w, dims = [], True, 0, None
-    for it in order.get("items", []):
-        canon = pl_cogs.resolve_to_canonical(it.get("sku")) if it.get("sku") else ""
-        d = m5.get_package_default(account, canon) or {}
-        if not all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm")):
-            ok = False
-        total_w += (d.get("weight_g") or 0) * (it.get("qty") or 1)
-        if dims is None and d.get("length_cm") is not None:
-            dims = (d["length_cm"], d["width_cm"], d["height_cm"])
-        items.append(dict(it, canonical=canon))
-    if not ok or not dims:
-        flash("This order isn't quote-ready — fill weight + size for every line first.")
-        return redirect(f"/ship?account={account}")
-    if not module5_orders.load_ship_from():
-        error = "Set the SHIP_FROM variable (your dispatch address, as JSON) in Railway to get quotes."
     else:
-        parcel = dict(weight_g=total_w, length_cm=dims[0], width_cm=dims[1], height_cm=dims[2], multi=len(items) > 1)
-        try:
-            req = module5_orders.build_shipment_request(order_id, items, module5_orders.load_ship_from(),
-                                                        total_w, dims[0], dims[1], dims[2])
-            services, notes = module5_orders.eligible_services(cfg, acct, req)
-            picked, met = module5_orders.pick_cheapest(services, order.get("deliver_by"))
-        except Exception as e:
-            log.warning("quote failed for %s: %s", order_id, e)
-            error = f"Quote failed: {str(e)[:250]}"
+        items, ok, total_w, dims = [], True, 0, None
+        for it in order.get("items", []):
+            canon = pl_cogs.resolve_to_canonical(it.get("sku")) if it.get("sku") else ""
+            d = m5.get_package_default(account, canon) or {}
+            if not all(d.get(k) is not None for k in ("weight_g", "length_cm", "width_cm", "height_cm")):
+                ok = False
+            total_w += (d.get("weight_g") or 0) * (it.get("qty") or 1)
+            if dims is None and d.get("length_cm") is not None:
+                dims = (d["length_cm"], d["width_cm"], d["height_cm"])
+            items.append(dict(it, canonical=canon))
+        if not ok or not dims:
+            flash("This order isn't quote-ready — fill weight + size for every line first.")
+            return redirect(f"/ship?account={account}")
+        if not module5_orders.load_ship_from():
+            error = "Set the SHIP_FROM variable (your dispatch address, as JSON) in Railway to get quotes."
+        else:
+            parcel = dict(weight_g=total_w, length_cm=dims[0], width_cm=dims[1], height_cm=dims[2], multi=len(items) > 1)
+            try:
+                req = module5_orders.build_shipment_request(order_id, items, module5_orders.load_ship_from(),
+                                                            total_w, dims[0], dims[1], dims[2])
+                services, notes = module5_orders.eligible_services(cfg, acct, req)
+                picked, met = module5_orders.pick_cheapest(services, order.get("deliver_by"))
+            except Exception as e:
+                error = f"Quote failed: {str(e)[:250]}"
     return render_template_string(QUOTE_HTML, order_id=order_id, account=account, order=order,
                                   services=services, notes=notes, picked=picked, met=met, parcel=parcel, error=error)
 
