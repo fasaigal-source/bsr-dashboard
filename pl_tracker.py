@@ -109,15 +109,68 @@ HTTP_TIMEOUT_SECONDS = 60   # httpx's own default (~5s total) is too tight for A
                             # a bounded number of retries second.
 
 
+def _spapi_creds_from_db_or_env():
+    """SP-API creds + accounts from the Settings-page DB row first, then Railway env
+    vars (SPAPI_LWA_APP_ID / SPAPI_LWA_CLIENT_SECRET / SPAPI_ACCOUNTS). Read DIRECTLY
+    here (not via module5_orders.load_spapi_config) to avoid a circular call back into
+    load_config(). Returns ({lwa_app_id, lwa_client_secret}, [accounts]) or (None, [])."""
+    import os
+    UK = "A1F83G8C2ARO7P"
+    # 1) Settings page (DB)
+    try:
+        import module5_labels_db as m5
+        s = m5.get_setting("spapi")
+        if s and s.get("lwa_app_id") and s.get("accounts"):
+            accts = [dict(a) for a in s["accounts"] if a.get("refresh_token")]
+            for a in accts:
+                a.setdefault("marketplace_id", UK)
+            if accts:
+                return {"lwa_app_id": s["lwa_app_id"],
+                        "lwa_client_secret": s.get("lwa_client_secret")}, accts
+    except Exception as e:
+        log.warning("pl_tracker: DB SP-API settings read failed: %s", e)
+    # 2) Railway env vars
+    app_id = os.environ.get("SPAPI_LWA_APP_ID")
+    secret = os.environ.get("SPAPI_LWA_CLIENT_SECRET")
+    raw = os.environ.get("SPAPI_ACCOUNTS")
+    if app_id and secret and raw:
+        try:
+            accounts = json.loads(raw)
+        except Exception as e:
+            log.warning("pl_tracker: SPAPI_ACCOUNTS is not valid JSON: %s", e)
+            accounts = []
+        for a in accounts:
+            a.setdefault("marketplace_id", UK)
+        accts = [a for a in accounts if a.get("refresh_token")]
+        if accts:
+            return {"lwa_app_id": app_id, "lwa_client_secret": secret}, accts
+    return None, []
+
+
 def load_config():
     # config.json holds SP-API creds + settings for the LOCAL sync. On Railway the
-    # dashboard has no config.json (it's gitignored), but a network-free reprocess
-    # doesn't need it — accounts come from the DB. Return {} rather than crashing.
+    # dashboard has no config.json (it's gitignored) — so if it's absent or carries no
+    # LWA creds, fall back to the same DB-settings / env-var creds the dashboard uses.
+    # This lets `python pl_tracker.py` run as a Railway cron with SPAPI_ACCOUNTS set.
     try:
         with open(CONFIG_PATH) as f:
-            return json.load(f)
+            cfg = json.load(f)
     except FileNotFoundError:
-        return {}
+        cfg = {}
+    if not cfg.get("credentials", {}).get("lwa_app_id"):
+        creds, accounts = _spapi_creds_from_db_or_env()
+        if creds:
+            cfg.setdefault("credentials", {}).update(creds)
+            have = {a.get("account_id") for a in cfg.get("accounts", [])}
+            cfg.setdefault("accounts", [])
+            for a in accounts:
+                if a.get("account_id") in have:
+                    for ex in cfg["accounts"]:
+                        if ex.get("account_id") == a.get("account_id"):
+                            ex.update({k: v for k, v in a.items() if v is not None})
+                else:
+                    cfg["accounts"].append(a)
+    return cfg
 
 
 def get_effective_accounts(cfg):
