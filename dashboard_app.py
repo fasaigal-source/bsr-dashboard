@@ -50,7 +50,6 @@ _NAV_GROUPS = [
     {"label": "Settings", "items": [
         ("/settings", "Channels &amp; dispatch"),
         ("/mirakl/test", "Mirakl connection test"),
-        ("/accounts", "Accounts &amp; users"),
     ]},
 ]
 

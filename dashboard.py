@@ -30,7 +30,7 @@ import dashboard_settings   # noqa: F401 -- registers the website Settings page 
 import dashboard_inventory  # noqa: F401 -- registers the /inventory page on `app`
 import dashboard_purchasing # noqa: F401 -- registers the /purchase-orders pages on `app`
 import dashboard_advertising # noqa: F401 -- registers the /advertising hub on `app`
-import dashboard_accounts    # noqa: F401 -- registers login + the auth guard on `app`
+# import dashboard_accounts  # DISABLED for now (opt-in login) — re-enable to resume Accounts
 
 # startup schema init + idempotent seeds
 from module1_db import init_schema
@@ -45,7 +45,7 @@ import mirakl_db
 import module5_labels_db
 import module6_inventory
 import module7_purchasing
-import module8_accounts
+# import module8_accounts  # DISABLED for now — re-enable with dashboard_accounts
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +79,6 @@ def _bootstrap():
         ("labels schema (M5a)",      module5_labels_db.init_labels_schema),
         ("inventory schema (M6)",    module6_inventory.init_inventory_schema),
         ("purchasing schema (M7)",   module7_purchasing.init_purchasing_schema),
-        ("accounts schema (M8)",     module8_accounts.init_accounts_schema),
         ("admin schema",             dashboard_admin.init_admin_schema),
         ("seed csvs",                pl_cogs.seed_from_csvs),
         ("seed confirmed asins",     pl_cogs.seed_confirmed_asin_pairs),
