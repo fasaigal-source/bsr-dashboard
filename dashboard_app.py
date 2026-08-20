@@ -34,6 +34,7 @@ _NAV_GROUPS = [
         ("/pl/postage", "Missing postage"),
     ]},
     ("/inventory", "Inventory"),
+    ("/purchase-orders", "Purchasing"),
     ("/products", "Products"),
     {"label": "Analytics", "items": [
         ("/pl", "P&amp;L"),
@@ -41,6 +42,7 @@ _NAV_GROUPS = [
         ("/pl/ads", "Ad spend"),
         ("/pl/expenses", "Expenses"),
         ("/ppc", "PPC"),
+        ("/advertising", "Advertising"),
         ("/calculator", "Scale-up calculator"),
         ("/baseline", "Market baseline"),
         ("/channels", "Channels report"),
@@ -48,6 +50,7 @@ _NAV_GROUPS = [
     {"label": "Settings", "items": [
         ("/settings", "Channels &amp; dispatch"),
         ("/mirakl/test", "Mirakl connection test"),
+        ("/accounts", "Accounts &amp; users"),
     ]},
 ]
 

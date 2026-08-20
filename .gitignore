@@ -64,6 +64,17 @@
 !/module6_inventory.py
 !/dashboard_inventory.py
 
+# Module 7 (suppliers + purchase orders)
+!/module7_purchasing.py
+!/dashboard_purchasing.py
+
+# Advertising hub (Amazon + eBay)
+!/dashboard_advertising.py
+
+# Module 8 (accounts + login)
+!/module8_accounts.py
+!/dashboard_accounts.py
+
 # one-time maintenance triggers (internal-network reprocess, etc.)
 !/dashboard_admin.py
 
