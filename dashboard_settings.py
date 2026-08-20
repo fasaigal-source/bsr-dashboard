@@ -134,7 +134,18 @@ PAGE = """
         </div>
       {% endfor %}
     </div>
-    <div class="muted" style="margin-top:14px">After connecting Mirakl, check <a href="/mirakl/test">/mirakl/test</a>. Sales by channel lives under <a href="/channels">Analytics → Channels report</a>.</div>
+    <div class="secttl" style="margin-top:22px">Carriers <span class="muted">— shipping services for labels</span></div>
+    <div class="grid">
+      {% for c in carriers %}
+        <div class="ch{{ '' if c.on else ' soon' }}">
+          <div class="top"><div class="logo" style="background:{{ c.color }}">{{ c.mark }}</div>
+            <div><div class="nm">{{ c.name }}</div><div class="sub">{{ c.kind }}</div></div></div>
+          {% if c.on %}<span class="badge b-on">● Active</span>{% else %}<span class="badge b-soon">Coming soon</span>{% endif %}
+        </div>
+      {% endfor %}
+    </div>
+
+    <div class="muted" style="margin-top:14px">After connecting Mirakl, check <a href="/mirakl/test">/mirakl/test</a>. Sales by channel lives under <a href="/channels">Analytics → Channels report</a>. Multiple accounts per channel and the extra carriers are on the roadmap.</div>
   </div>
 
   <!-- Amazon modal -->
@@ -240,14 +251,23 @@ def settings_page():
          "color": "#ff6600", "mark": "B", "connected": bandq_on,
          "detail": ("shop " + str(bandq_shop)) if bandq_shop else None},
         {"soon": True, "name": "eBay", "kind": "Marketplace", "color": "#e53238", "mark": "e"},
-        {"soon": True, "name": "TikTok Shop", "kind": "Marketplace", "color": "#111827", "mark": "t"},
+        {"soon": True, "name": "OnBuy", "kind": "Marketplace", "color": "#14213d", "mark": "O"},
         {"soon": True, "name": "Etsy", "kind": "Marketplace", "color": "#f56400", "mark": "E"},
+        {"soon": True, "name": "Shein", "kind": "Marketplace", "color": "#111827", "mark": "Sh"},
+        {"soon": True, "name": "Temu", "kind": "Marketplace", "color": "#fb7701", "mark": "T"},
+        {"soon": True, "name": "Wayfair", "kind": "Marketplace", "color": "#7b189f", "mark": "W"},
+        {"soon": True, "name": "Facebook", "kind": "Marketplace", "color": "#1877f2", "mark": "f"},
+        {"soon": True, "name": "Wowcher", "kind": "Marketplace", "color": "#e6007e", "mark": "w"},
+        {"soon": True, "name": "Groupon", "kind": "Marketplace", "color": "#53a318", "mark": "G"},
         {"soon": True, "name": "Shopify", "kind": "eCommerce", "color": "#5a8f3d", "mark": "S"},
-        {"soon": True, "name": "Walmart", "kind": "Marketplace", "color": "#0071dc", "mark": "W"},
-        {"soon": True, "name": "WooCommerce", "kind": "eCommerce", "color": "#7f54b3", "mark": "w"},
-        {"soon": True, "name": "Magento", "kind": "eCommerce", "color": "#ee672f", "mark": "M"},
     ]
-    return render_template_string(PAGE, tab=tab, channels=channels,
+    carriers = [
+        {"name": "Amazon Buy Shipping", "kind": "Carrier · live on Ship labels", "color": "#ff9900", "mark": "a", "on": True},
+        {"name": "Evri", "kind": "Carrier", "color": "#0a2b4e", "mark": "Ev"},
+        {"name": "Royal Mail", "kind": "Carrier", "color": "#da291c", "mark": "RM"},
+        {"name": "Parcel2Go", "kind": "Carrier", "color": "#00a5e0", "mark": "P2"},
+    ]
+    return render_template_string(PAGE, tab=tab, channels=channels, carriers=carriers,
                                   spapi=spapi, acct=acct, ship=ship,
                                   tesco=tesco, bandq=bandq)
 
