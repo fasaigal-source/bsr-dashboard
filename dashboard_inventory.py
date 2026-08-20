@@ -35,6 +35,10 @@ PAGE = """
  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
  tr:hover td{background:#f8fafb}
  .q0{color:#c0392b;font-weight:700} .qlow{color:#c77700;font-weight:600}
+ .sb{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}
+ .s-out{background:#fdecec;color:#c0392b} .s-reorder{background:#fde7cf;color:#b45309}
+ .s-low{background:#fff6e0;color:#a76b00} .s-ok{background:#e4f6ea;color:#1f7a45}
+ .s-idle{background:#eef1f4;color:#8a94a2} .s-unknown{background:#eef1f4;color:#8a94a2}
  .pill{font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px}
  .p-run{background:#fff6e0;color:#a76b00} .p-done{background:#e4f6ea;color:#1f7a45} .p-err{background:#fdecec;color:#c0392b}
  .chip{font-size:11px;color:#5a6472;background:#f1f3f5;padding:2px 7px;border-radius:6px}
@@ -55,6 +59,7 @@ PAGE = """
     <div class="kpis">
       <div class="kpi"><b>{{ s.skus }}</b><span>SKUs</span></div>
       <div class="kpi"><b>{{ s.units }}</b><span>units in stock</span></div>
+      <div class="kpi"><b style="color:#c0392b">{{ reorder }}</b><span>need reorder</span></div>
       <div class="kpi"><b>{{ s.oos }}</b><span>out of stock</span></div>
     </div>
   </div>
@@ -63,32 +68,39 @@ PAGE = """
     <form class="row" method="GET" action="/inventory" style="margin-bottom:12px">
       <input class="search" name="q" value="{{ q or '' }}" placeholder="Search SKU, ASIN, or title…">
       <button class="btn" type="submit">Search</button>
-      {% if q %}<a class="chip" href="/inventory">clear</a>{% endif %}
-      <span class="muted">Lowest stock first · {{ rows|length }} shown</span>
+      {% if filter == 'reorder' %}<input type="hidden" name="filter" value="reorder">{% endif %}
+      {% if q %}<a class="chip" href="/inventory{{ '?filter=reorder' if filter=='reorder' else '' }}">clear search</a>{% endif %}
+      {% if filter == 'reorder' %}<a class="chip" href="/inventory{{ ('?q='+q) if q else '' }}">show all</a>
+      {% else %}<a class="chip" href="/inventory?filter=reorder{{ ('&q='+q) if q else '' }}">reorder only</a>{% endif %}
+      <span class="muted">Reorder first · {{ rows|length }} shown · sold = units in trailing days</span>
     </form>
     {% if rows %}
     <table>
       <thead><tr>
-        <th>SKU</th><th>Canonical</th><th>ASIN</th><th>Title</th>
-        <th class="num">Price</th><th class="num">Qty</th><th>Channel</th>
+        <th>SKU</th><th>ASIN</th><th>Title</th>
+        <th class="num">Qty</th><th class="num">7d</th><th class="num">14d</th><th class="num">30d</th>
+        <th class="num">Cover</th><th>Status</th>
       </tr></thead>
       <tbody>
       {% for r in rows %}
         <tr>
-          <td>{{ r.seller_sku }}</td>
-          <td>{% if r.canonical_sku and r.canonical_sku != r.seller_sku %}<a href="/pl/sku/{{ r.canonical_sku }}">{{ r.canonical_sku }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{% if r.canonical_sku and r.canonical_sku != r.seller_sku %}<a href="/pl/sku/{{ r.canonical_sku }}">{{ r.seller_sku }}</a>{% else %}{{ r.seller_sku }}{% endif %}</td>
           <td>{% if r.asin %}<a href="https://www.amazon.co.uk/dp/{{ r.asin }}" target="_blank" rel="noopener">{{ r.asin }}</a>{% else %}—{% endif %}</td>
-          <td>{{ (r.title or '')[:60] }}</td>
-          <td class="num">{% if r.price is not none %}£{{ '%.2f'|format(r.price|float) }}{% else %}—{% endif %}</td>
+          <td>{{ (r.title or '')[:46] }}</td>
           <td class="num"><span class="{{ 'q0' if not r.quantity else ('qlow' if r.quantity|int < 5 else '') }}">{{ r.quantity if r.quantity is not none else '—' }}</span></td>
-          <td><span class="chip">{{ r.channel or '—' }}</span></td>
+          <td class="num">{{ r.u7 }}</td>
+          <td class="num">{{ r.u14 }}</td>
+          <td class="num">{{ r.u30 }}</td>
+          <td class="num">{% if r.days_cover is not none %}{{ '%.0f'|format(r.days_cover) }}d{% else %}—{% endif %}</td>
+          <td><span class="sb s-{{ r.stock_status }}">{{
+              {'out':'Out','reorder':'Reorder','low':'Low','ok':'OK','idle':'No sales','unknown':'—'}[r.stock_status] }}</span></td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
     {% else %}
     <div class="empty">
-      {% if q %}No listings match “{{ q }}”.{% else %}No inventory pulled yet. Click <b>Refresh from Amazon</b> to fetch your current listings and stock levels.{% endif %}
+      {% if filter == 'reorder' %}Nothing needs reordering right now. 🎉{% elif q %}No listings match “{{ q }}”.{% else %}No inventory pulled yet. Click <b>Refresh from Amazon</b> to fetch your current listings and stock levels.{% endif %}
     </div>
     {% endif %}
   </div>
@@ -120,12 +132,22 @@ PAGE = """
 """
 
 
+_STATUS_ORDER = {"out": 0, "reorder": 1, "low": 2, "idle": 3, "ok": 4, "unknown": 5}
+
+
 @app.route("/inventory")
 def inventory_page():
     q = request.args.get("q", "").strip() or None
+    filt = request.args.get("filter", "").strip() or None
     rows = inv.list_inventory(q=q)
+    reorder = inv.enrich_with_prediction(rows)
+    # most-urgent first: status bucket, then fewest days of cover
+    rows.sort(key=lambda r: (_STATUS_ORDER.get(r.get("stock_status"), 9),
+                             r.get("days_cover") if r.get("days_cover") is not None else 1e9))
+    if filt == "reorder":
+        rows = [r for r in rows if r.get("stock_status") in ("out", "reorder")]
     s = inv.summary()
-    return render_template_string(PAGE, rows=rows, s=s, q=q)
+    return render_template_string(PAGE, rows=rows, s=s, q=q, filter=filt, reorder=reorder)
 
 
 @app.route("/inventory/refresh")

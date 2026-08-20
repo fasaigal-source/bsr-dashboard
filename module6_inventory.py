@@ -282,3 +282,69 @@ def summary():
         "SUM(CASE WHEN quantity=0 OR quantity IS NULL THEN 1 ELSE 0 END) AS oos, "
         "MAX(fetched_at) AS updated FROM inventory_snapshot").fetchone()
     return dict(r) if r else {"skus": 0, "units": 0, "oos": 0, "updated": None}
+
+
+# ── sales velocity / prediction ──────────────────────────────────────────────
+
+def velocity_by_asin(windows=(7, 14, 30)):
+    """Units sold per ASIN over trailing N-day windows, from the P&L line-item ledger.
+    Returns {asin: {7: n, 14: n, 30: n}}. Only counts positive-quantity sale lines
+    (refund lines are excluded). posted_date is ISO text, so lexical >= is a valid
+    date comparison."""
+    from datetime import datetime, timezone, timedelta
+    conn = get_db()
+    now = datetime.now(timezone.utc)
+    wmax = max(windows)
+    cutoffs = {w: (now - timedelta(days=w)).strftime("%Y-%m-%dT%H:%M:%SZ") for w in windows}
+    cut_max = (now - timedelta(days=wmax)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sel = ", ".join(
+        f"SUM(CASE WHEN posted_date >= ? THEN quantity ELSE 0 END) AS w{w}" for w in windows)
+    params = [cutoffs[w] for w in windows] + [cut_max]
+    rows = conn.execute(
+        f"SELECT asin, {sel} FROM pl_line_items "
+        f"WHERE asin IS NOT NULL AND asin <> '' AND quantity > 0 AND posted_date >= ? "
+        f"GROUP BY asin", params).fetchall()
+    out = {}
+    for r in rows:
+        d = dict(r)
+        out[d["asin"]] = {w: int(d.get(f"w{w}") or 0) for w in windows}
+    return out
+
+
+def _cover_status(qty, daily_rate):
+    """Days of cover + a status bucket from stock on hand and a daily sales rate."""
+    if qty is None:
+        return None, "unknown"
+    if qty <= 0:
+        return 0.0, "out"
+    if not daily_rate or daily_rate <= 0:
+        return None, "idle"          # no recent sales — can't predict
+    cover = qty / daily_rate
+    if cover < 7:
+        return cover, "reorder"
+    if cover < 14:
+        return cover, "low"
+    return cover, "ok"
+
+
+def enrich_with_prediction(rows, windows=(7, 14, 30)):
+    """Attach u7/u14/u30, daily rate, days-of-cover and a status bucket to each
+    inventory row (in place) using ASIN-keyed velocity. Daily rate uses the longest
+    window available with sales (30d preferred) for a stable estimate."""
+    vel = velocity_by_asin(windows)
+    reorder = 0
+    for r in rows:
+        v = vel.get(r.get("asin")) or {}
+        for w in windows:
+            r[f"u{w}"] = v.get(w, 0)
+        # daily rate = the FASTEST pace across the windows, so a recent surge drives
+        # the reorder flag instead of being diluted by a long, quiet 30-day average.
+        rates = [v[w] / float(w) for w in windows if v.get(w)]
+        daily = max(rates) if rates else 0.0
+        r["daily_rate"] = round(daily, 2)
+        cover, status = _cover_status(r.get("quantity"), daily)
+        r["days_cover"] = cover
+        r["stock_status"] = status
+        if status == "reorder" or status == "out":
+            reorder += 1
+    return reorder
