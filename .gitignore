@@ -71,6 +71,10 @@
 # Advertising hub (Amazon + eBay)
 !/dashboard_advertising.py
 
+# Module 3 Phase 1 (Amazon Ads API full data pull)
+!/ppc_ads_data.py
+!/dashboard_ppc_data.py
+
 # Module 8 (accounts + login)
 !/module8_accounts.py
 !/dashboard_accounts.py
