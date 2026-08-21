@@ -36,6 +36,7 @@ _NAV_GROUPS = [
     ("/inventory", "Inventory"),
     ("/purchase-orders", "Purchasing"),
     ("/products", "Products"),
+    ("/advertising", "Advertising"),
     {"label": "Analytics", "items": [
         ("/pl", "P&amp;L"),
         ("/pl/cogs", "COGS &amp; pricing"),
@@ -43,7 +44,6 @@ _NAV_GROUPS = [
         ("/pl/expenses", "Expenses"),
         ("/ppc", "PPC"),
         ("/ppc/data", "PPC data (Ads API)"),
-        ("/advertising", "Advertising"),
         ("/calculator", "Scale-up calculator"),
         ("/baseline", "Market baseline"),
         ("/channels", "Channels report"),
