@@ -44,6 +44,7 @@ _NAV_GROUPS = [
         ("/pl/expenses", "Expenses"),
         ("/ppc", "PPC"),
         ("/ppc/data", "PPC data (Ads API)"),
+        ("/ppc/objective", "PPC optimiser goal"),
         ("/calculator", "Scale-up calculator"),
         ("/baseline", "Market baseline"),
         ("/channels", "Channels report"),

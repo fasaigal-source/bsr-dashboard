@@ -75,6 +75,10 @@
 !/ppc_ads_data.py
 !/dashboard_ppc_data.py
 
+# Module 3 Phase 2 (optimiser objective + per-SKU target ACOS)
+!/ppc_objective.py
+!/dashboard_ppc_objective.py
+
 # Module 8 (accounts + login)
 !/module8_accounts.py
 !/dashboard_accounts.py

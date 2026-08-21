@@ -31,6 +31,7 @@ import dashboard_inventory  # noqa: F401 -- registers the /inventory page on `ap
 import dashboard_purchasing # noqa: F401 -- registers the /purchase-orders pages on `app`
 import dashboard_advertising # noqa: F401 -- registers the /advertising hub on `app`
 import dashboard_ppc_data    # noqa: F401 -- registers the /ppc/data Ads-API pull on `app`
+import dashboard_ppc_objective # noqa: F401 -- registers the /ppc/objective optimiser goal on `app`
 # import dashboard_accounts  # DISABLED for now (opt-in login) — re-enable to resume Accounts
 
 # startup schema init + idempotent seeds
