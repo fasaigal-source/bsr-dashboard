@@ -33,6 +33,13 @@ _REGION_HOST = {
     "fe": "advertising-api-fe.amazon.com",
 }
 _TOKEN_URL = "https://api.amazon.com/auth/o2/token"
+# LWA token endpoint is region-specific for the Ads API. Refreshing an EU-issued token
+# against the NA endpoint can fail, so pick by region (falls back to the global URL).
+_TOKEN_URL_BY_REGION = {
+    "na": "https://api.amazon.com/auth/o2/token",
+    "eu": "https://api.amazon.co.uk/auth/o2/token",
+    "fe": "https://api.amazon.co.jp/auth/o2/token",
+}
 _token_cache = {}   # refresh_token -> (access_token, expiry_epoch)
 
 
@@ -63,7 +70,8 @@ def _get_access_token(creds):
     tok, exp = _token_cache.get(key, (None, 0))
     if tok and time.time() < exp - 60:
         return tok
-    r = httpx.post(_TOKEN_URL, data={
+    token_url = _TOKEN_URL_BY_REGION.get(creds.get("region", "eu"), _TOKEN_URL)
+    r = httpx.post(token_url, data={
         "grant_type": "refresh_token",
         "refresh_token": creds["refresh_token"],
         "client_id": creds["client_id"],
